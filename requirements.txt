@@ -1,0 +1,8 @@
+numpy
+scipy>=1.4.1
+matplotlib>=3.1.2
+sk-video
+joblib
+opencv-python
+tk
+pysimplegui==4.43.0

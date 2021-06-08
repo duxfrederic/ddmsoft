@@ -1,0 +1,14 @@
+name: ddmsoft
+channels:
+   - conda-forge
+   - anaconda
+dependencies:
+   - python=3.6
+   - numpy
+   - scipy=1.4.1
+   - matplotlib=3.1.2
+   - sk-video
+   - joblib
+   - opencv
+   - pysimplegui
+   - pyinstaller=3.6

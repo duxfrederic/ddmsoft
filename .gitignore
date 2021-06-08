@@ -1,0 +1,11 @@
+*__pycache__*
+*/__pycache__/*
+**/__pycache_/*
+.spyproject/*
+*.spec
+*.pyo
+build
+build/*
+dist
+dist/*
+dist/**
