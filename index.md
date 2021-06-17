@@ -1,4 +1,5 @@
-## Welcome to GitHub Pages
+## Basic workflow with DDMSoft
+![Image](figures/interfaceannotated.png)
 
 You can use the [editor on GitHub](https://github.com/duxfrederic/ddmsoft/edit/gh-pages/index.md) to maintain and preview the content for your website in Markdown files.
 
