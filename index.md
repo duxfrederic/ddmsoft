@@ -10,7 +10,7 @@ We have used DDMSoft extensively in our differential dynamic microscopy routine,
   pixelsize: 1.1e-7 
   framerate: 913
   ```
-  You can either create a single text file for all the videos (the same parameters will then apply to all of them), or create one textfile per video with the same name (but ending in .txt rather than e.g. .avi).
+  You can either create a single text file for all the videos (the same parameters will then apply to all of them), or create one text file per video with the same name (but ending in .txt rather than e.g. .avi).
 
 You may then switch to DDMSoft and refer to the image below.
 
