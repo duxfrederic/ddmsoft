@@ -61,7 +61,7 @@ def mergeDDM(computedData, mode='merge', title=''):
 
 def merge(ddmf, ddms, dtsf, dtss):
     """
-        adapted from http://perso.ens-lyon.fr/thomas.gibaud/ddm
+        Taken from http://perso.ens-lyon.fr/thomas.gibaud/ddm
         ( https://aapt.scitation.org/doi/10.1119/1.4939516 )
     """ 
     # Find the closest time at the fast freq to the smallest time at the small freq
