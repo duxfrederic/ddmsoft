@@ -11,8 +11,6 @@ We have used DDMSoft extensively in our differential dynamic microscopy routine,
   framerate: 913
   ```
 You may then switch to DDMSoft and refer to the image below.
-{:refdef: style="text-align: center;"}
 ![Image](figures/interfaceannotated.png)
-{: refdef}
 
 
