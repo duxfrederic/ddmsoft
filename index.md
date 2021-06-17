@@ -1,38 +1,18 @@
 ## Basic workflow with DDMSoft
+We have used DDMSoft extensively in our differential dynamic microscopy routine, and we think that our workflow has become quite efficient. The main line are as follows:
+
+1. Have DDMSoft installed on the same computer that captures the microscopy videos.
+2. After recording some videos: in folder that contains the videos, create companion textfiles with 
+ * The pixel size in meters 
+ * The acquisition frame rate in frames per second
+  It should look like this
+  ```
+  pixelsize: 1.1e-7 
+  framerate: 913
+  ```
+You may then switch to DDMSoft and refer to the image below.
+{:refdef: style="text-align: center;"}
 ![Image](figures/interfaceannotated.png)
+{: refdef}
 
-You can use the [editor on GitHub](https://github.com/duxfrederic/ddmsoft/edit/gh-pages/index.md) to maintain and preview the content for your website in Markdown files.
 
-Whenever you commit to this repository, GitHub Pages will run [Jekyll](https://jekyllrb.com/) to rebuild the pages in your site, from the content in your Markdown files.
-
-### Markdown
-
-Markdown is a lightweight and easy-to-use syntax for styling your writing. It includes conventions for
-
-```markdown
-Syntax highlighted code block
-
-# Header 1
-## Header 2
-### Header 3
-
-- Bulleted
-- List
-
-1. Numbered
-2. List
-
-**Bold** and _Italic_ and `Code` text
-
-[Link](url) and ![Image](src)
-```
-
-For more details see [GitHub Flavored Markdown](https://guides.github.com/features/mastering-markdown/).
-
-### Jekyll Themes
-
-Your Pages site will use the layout and styles from the Jekyll theme you have selected in your [repository settings](https://github.com/duxfrederic/ddmsoft/settings/pages). The name of this theme is saved in the Jekyll `_config.yml` configuration file.
-
-### Support or Contact
-
-Having trouble with Pages? Check out our [documentation](https://docs.github.com/categories/github-pages-basics/) or [contact support](https://support.github.com/contact) and we’ll help you sort it out.
