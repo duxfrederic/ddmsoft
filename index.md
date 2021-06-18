@@ -3,8 +3,9 @@ We have used DDMSoft extensively in our differential dynamic microscopy routine,
 
 * Have DDMSoft installed on the same computer that captures the microscopy videos.
 * After recording some videos: in folder that contains the videos, create companion textfiles with 
-   * The pixel size in meters 
-   * The acquisition frame rate in frames per second
+   * the pixel size in meters,
+   * the acquisition frame rate in frames per second.
+    
     The content of the text file should look like this
     ```
     pixelsize: 1.1e-7 
