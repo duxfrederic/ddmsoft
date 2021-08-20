@@ -222,6 +222,8 @@ class FFTStack():
         DDMs       = self.ddm(idts, self.maxCouples)
         
         qs         = np.pi/(DDMs[0].shape[-1]*self.pixelsize) * np.arange(DDMs[0].shape[-1])
+        # move the values to the center of each bin (see utilities.RadialAverager)
+        qs         = qs + 0.5 * (qs[1]-qs[0])
         
         expname    = self.filename.replace('.avi', '')
         expdir     = dirname(expname)

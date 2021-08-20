@@ -255,7 +255,7 @@ class RadialAverager(object):
         # matrix of distances (we never do fftshift)
         self.dists       = np.sqrt(np.fft.fftfreq(shape[0])[:,None]**2 +  np.fft.fftfreq(shape[1])[None,:]**2)
 
-        self.radbins     = np.arange(max(shape)/2+1)/float(max(shape))
+        self.radbins     = np.arange(max(shape)//2+1)/float(max(shape))
         if N > 1:
             # matrix of arguments
             self.args    = np.arctan(np.fft.fftfreq(shape[1])[None,:] / np.fft.fftfreq(shape[0])[:,None]) + np.pi/2 
