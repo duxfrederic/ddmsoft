@@ -116,21 +116,17 @@ def single_exponential(params, QS, DTS):
 
 
 def cumulant_exponential(params, QS, DTS):
-    numorder  = len(params) - 2
-    Gamma     = params[2]*QS**2
-    cumulants = []
-    for order in range(0, numorder-1):
-        cumu = params[ 3+order ]
-        if (order+1) % 2 == 0:
-            cumu = np.abs(cumu)
-        cumulants.append(cumu)
-    mean_decay = np.exp(-DTS*Gamma)
-    lineardev  = 1
+    tauq      = DTS * QS**2
+    Gamma     = params[2]  # Gamma mean, rescaled.
+    cumulants = params[3:]  # mu2, mu3, mu4 ...
+    #  mean decay (first moment)
+    meandecay = np.exp(- Gamma * tauq)
+    # add more
+    deviation = 1.
     for i, cumulant in enumerate(cumulants):
-        exponent   = i + 2
-        lineardev += (-cumulant*DTS*QS**2)**exponent / factorial(exponent)
-    mean_decay    *= lineardev
-    return mean_decay
+        order = i + 2
+        deviation += (-1)**order * cumulant * tauq**order / factorial(order)
+    return deviation * meandecay
 
 
 def stretch_exponential(params, QS, DTS):
