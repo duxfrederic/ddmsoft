@@ -17,7 +17,7 @@ DDMSoft is a Python based GUI that essentially converts a differential dynamic m
 
 
 ## Installation
-For Windows users, a 'compiled' version is available at <https://nc.fdux.ch/index.php/s/RBpG7TNHM8Eg648>.
+For Windows users, a 'compiled' version is available at <https://drive.google.com/file/d/1JKvarEPvleWI-YdoHVDwUKp7NHqOkeR_/view?usp=sharing>.
 
 
 For Linux users, the best is to download Anaconda: <https://www.anaconda.com/products/individual>. Anaconda comes with fast algebra libraries and thus will be quick at processing the data. Then:
