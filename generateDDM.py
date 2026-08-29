@@ -6,17 +6,17 @@ A small GUI program to interface a custom DDM setup.
 @author: Frédéric Dux, biosoft intern@IPC with Jerome Crassous
 """
 
-import  numpy              as      np
-from    scipy.signal       import  tukey
-from    skvideo.io         import  vread, vreader, FFmpegReader
-from    os.path            import  exists, basename, dirname, join
-from    os                 import  makedirs, remove
+import  numpy                as      np
+from    scipy.signal.windows import  tukey
+from    skvideo.io           import  vread, vreader, FFmpegReader
+from    os.path              import  exists, basename, dirname, join
+from    os                   import  makedirs, remove
 import  cv2
-from    joblib             import  Parallel, delayed
-from    multiprocessing    import  cpu_count
-from    subprocess         import  call
+from    joblib               import  Parallel, delayed
+from    multiprocessing      import  cpu_count
+from    subprocess           import  call
 
-from    utilities          import  ddm_matrices, RadialAverager
+from    utilities            import  ddm_matrices, RadialAverager
 
 def tukey_twoD(width, alpha):
     """2D tukey lowpass window with a circular support

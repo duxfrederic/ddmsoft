@@ -8,7 +8,7 @@ A small GUI program to interface a custom DDM setup.
 
 from   os            import  name
 from   os.path       import  expanduser
-import PySimpleGUI   as      sg
+import FreeSimpleGUI as      sg
 
 sg.ChangeLookAndFeel('Reddit')
 sg.SetOptions(element_padding=((2, 2), (6, 5)))
