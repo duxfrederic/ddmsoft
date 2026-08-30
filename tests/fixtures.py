@@ -89,8 +89,8 @@ def model_parameters(model_id: str) -> tuple[float, ...]:
     """Return stable, non-degenerate parameters for a legacy model ID."""
     values = {
         "cumulant_1": (2.0e-12,),
-        "cumulant_2": (2.0e-12, 0.03),
-        "cumulant_3": (2.0e-12, 0.03, 0.002),
+        "cumulant_2": (2.0e-12, 3.0e-26),
+        "cumulant_3": (2.0e-12, 3.0e-26, 2.0e-38),
         "stretch": (2.0e-12, 0.82),
         "dblexp_2ndstretched": (2.0e-12, 6.0e-13, 0.78, 0.65),
         "expcos": (2.0e-12, 1.0e-7),
