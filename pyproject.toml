@@ -38,3 +38,7 @@ ddmsoft = ["resources/*"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
