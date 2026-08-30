@@ -5,12 +5,16 @@ import time
 import numpy as np
 import pytest
 from PySide6.QtCore import QSettings, QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from ddmsoft.engine import ComputationCancelled
 from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.gui.main_window import DDMMainWindow
-from ddmsoft.gui.workers import ComputationResult, FitComputationResult
+from ddmsoft.gui.workers import (
+    ComputationResult,
+    FitComputationResult,
+    batch_fit_target_paths,
+)
 from ddmsoft.io import save_matrix_set
 from ddmsoft.models import DDMData, FitRange, VideoMetadata
 from ddmsoft.plotting import (
@@ -318,6 +322,158 @@ def test_fit_result_for_previous_matrix_is_ignored(qapp, tmp_path):
 
     assert window.selected_matrix_path != first_path
     assert window.selected_fit is None
+    window.close()
+
+
+def test_matrix_selection_cancellation_has_no_combine_side_effect(qapp, tmp_path, monkeypatch):
+    root = _legacy_directory(tmp_path, "a", q_count=3, time_count=4)
+    _write_dataset(root, "b", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    monkeypatch.setattr(window, "_select_matrix_paths", lambda **kwargs: None)
+
+    assert not window.average_selected_matrices()
+    assert not tuple((root / "ddm_matrices").glob("average_result*.npy"))
+    window.close()
+
+
+def test_average_refreshes_matrix_catalog_and_rejects_incompatible_inputs(
+    qapp, tmp_path, monkeypatch
+):
+    root = _legacy_directory(tmp_path, "a", q_count=3, time_count=4)
+    _write_dataset(root, "b", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    selected = tuple(window._matrices)
+    output_prefix = root / "ddm_matrices" / "average_result"
+    monkeypatch.setattr(window, "_select_matrix_paths", lambda **kwargs: selected)
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+
+    assert window.average_selected_matrices()
+    output_matrix = output_prefix.with_name(output_prefix.name + "_DDM_matrix.npy")
+    assert output_matrix.is_file()
+    assert window.selected_matrix_path == output_matrix
+
+    incompatible_root = tmp_path / "incompatible"
+    incompatible_root.mkdir()
+    _legacy_directory(incompatible_root, "first", q_count=3, time_count=4)
+    _write_dataset(incompatible_root, "second", q_count=2, time_count=4)
+    assert window.load_directory_data(incompatible_root)
+    incompatible = tuple(window._matrices)
+    monkeypatch.setattr(window, "_select_matrix_paths", lambda **kwargs: incompatible)
+    monkeypatch.setattr(
+        window,
+        "_choose_output_prefix",
+        lambda *args: pytest.fail("output must not be requested after validation failure"),
+    )
+    assert not window.average_selected_matrices()
+    assert "incompatible matrix width" in window.status_label.text()
+    window.close()
+
+
+def test_merge_refreshes_matrix_catalog_after_successful_write(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "fast")
+    fast = generate_model_data("stretch")
+    slow = DDMData(
+        fast.matrix + 1.0,
+        fast.lag_times * 2.0,
+        fast.q_values,
+    )
+    write_legacy_matrix(root, "fast", fast)
+    write_legacy_matrix(root, "slow", slow)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    selected = tuple(window._matrices)
+    output_prefix = root / "ddm_matrices" / "merged_result"
+    monkeypatch.setattr(window, "_select_matrix_paths", lambda **kwargs: selected)
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+
+    assert window.merge_selected_matrices()
+    output_matrix = output_prefix.with_name(output_prefix.name + "_DDM_matrix.npy")
+    assert output_matrix.is_file()
+    assert window.selected_matrix_path == output_matrix
+    assert window.selected_matrix.matrix.shape[1] == fast.matrix.shape[1]
+    window.close()
+
+
+def test_exports_write_expected_dimensions_and_headers(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    data = generate_model_data("stretch")
+    write_legacy_matrix(root, "sample", data)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    window.model_selector.setCurrentIndex(window.model_selector.findData("stretch"))
+    request = default_fit_request("stretch", FitRange(0, 3, 0, 6))
+    path = window.selected_matrix_path
+    window._fit_results[path] = fit_ddm(data, request)
+    window._fit_requests[path] = request
+    window._update_matrix_action_state()
+    export_root = tmp_path / "exports"
+
+    def output_for(default, suffixes):
+        if suffixes == (".txt",):
+            return export_root / "fit"
+        if suffixes == ("_autocorrelationmatrix.csv", "_qs.csv", "_dts.csv"):
+            return export_root / "correlation"
+        return export_root / "matrix"
+
+    monkeypatch.setattr(window, "_choose_output_prefix", output_for)
+    assert window.export_selected_matrix()
+    assert window.export_selected_fit()
+    assert window.export_selected_correlation()
+    matrix_csv = np.loadtxt(export_root / "matrix_DDM_matrix.csv", delimiter="\t")
+    correlation_csv = np.loadtxt(
+        export_root / "correlation_autocorrelationmatrix.csv", delimiter="\t"
+    )
+    fit_lines = (export_root / "fit.txt").read_text(encoding="utf-8").splitlines()
+    assert matrix_csv.shape == data.matrix.shape
+    assert correlation_csv.shape == data.matrix.shape
+    assert fit_lines[0] == "q [m^-1]\tA\tB\tdiffusion\tstretch"
+    window.close()
+
+
+def test_batch_fit_main_window_stores_results_by_full_path(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "a")
+    first = generate_model_data("stretch")
+    second = generate_model_data("stretch", noise=0.001)
+    write_legacy_matrix(root, "a", first)
+    write_legacy_matrix(root, "b", second)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    window.model_selector.setCurrentIndex(window.model_selector.findData("stretch"))
+    selected = tuple(window._matrices)
+    batch_prefix = tmp_path / "batch"
+
+    class AcceptedBatchDialog:
+        DialogCode = QDialog.DialogCode
+        continue_on_failure = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    AcceptedBatchDialog.selected_paths = selected
+    AcceptedBatchDialog.output_prefix = batch_prefix
+    monkeypatch.setattr("ddmsoft.gui.main_window.BatchFitDialog", AcceptedBatchDialog)
+    monkeypatch.setattr(window, "_confirm_output_targets", lambda targets: True)
+    assert window.start_batch_fitting()
+    _wait_for(qapp, lambda: not window._job_active)
+
+    assert set(window._fit_results) == set(selected)
+    assert all(path.is_file() for path in batch_fit_target_paths(batch_prefix, selected))
+    assert "2 succeeded" in window.status_label.text()
     window.close()
 
 

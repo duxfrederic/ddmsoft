@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 12 are complete. Earlier packages were committed separately:
+Work packages 0 through 13 are complete. Earlier packages were committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -220,4 +220,23 @@ The untracked `roadmap.md` is user-provided and was intentionally not committed.
   progress, the complete inspect/fit/plot workflow, and stale-result handling.
 - Package 12 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
   python -m pytest` passed with 81 tests; scoped Ruff, bytecode compilation,
+  and `git diff --check` passed.
+
+## Package 13
+
+- Added a reusable searchable multi-selection dialog with explicit Select All
+  and Clear actions; selections retain full matrix paths rather than display
+  names.
+- Wired merge and average validation to exact three-file legacy matrix outputs,
+  with cancellation, confirmation, and matrix-catalog refresh after writing.
+- Wired matrix text, current-fit, and refined-correlation exports with exact
+  target previews and explicit overwrite confirmation.
+- Added batch-fit selection, output-prefix preview, per-matrix status/progress,
+  continue/stop failure policy, and preflight collision checks before worker
+  execution.
+- Added offscreen coverage for selection cancellation/filtering, merge/average
+  validation and refresh, export dimensions and headers, batch output safety,
+  and GUI batch result storage.
+- Package 13 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
+  python -m pytest` passed with 92 tests; scoped Ruff, bytecode compilation,
   and `git diff --check` passed.

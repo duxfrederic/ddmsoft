@@ -7,6 +7,7 @@ from itertools import pairwise
 from math import isfinite
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -33,14 +35,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..fitting import MODEL_REGISTRY, default_fit_request, get_model
+from ..combining import CombinationError, average_ddm, merge_ddm
+from ..fitting import (
+    MODEL_REGISTRY,
+    default_fit_request,
+    estimate_amplitude_background,
+    get_model,
+)
 from ..io import (
+    CSV_SUFFIXES,
+    LEGACY_SUFFIXES,
     DDMIOError,
     MatrixFileSet,
     discover_matrix_sets,
     display_names,
     load_directory,
     load_matrices,
+    save_autocorrelation_csv,
+    save_fit_text,
+    save_matrix_csv,
+    save_matrix_set,
 )
 from ..models import DDMData, FitRange, FitRequest, FitResult, VideoMetadata
 from ..plotting import (
@@ -49,13 +63,24 @@ from ..plotting import (
     FitParameterPlotController,
     MatrixPlotController,
 )
+from ..science import water_viscosity
 from .fit_dialog import InitialGuessDialog
+from .selection import (
+    BatchFitDialog,
+    MatrixSelectionDialog,
+    OutputPathDialog,
+    output_target_paths,
+)
 from .workers import (
+    BatchFitRequest,
+    BatchFitResult,
     ComputationResult,
     ComputationWorker,
     FitComputationRequest,
     FitComputationResult,
     VideoComputationRequest,
+    batch_fit_target_paths,
+    run_batch_fit,
     run_fit,
     run_video_computation,
 )
@@ -73,6 +98,7 @@ class DDMMainWindow(QMainWindow):
         self._q_values: tuple[float, ...] = ()
         self._lag_times: tuple[float, ...] = ()
         self._matrices: dict[Path, DDMData] = {}
+        self._matrix_names: dict[Path, str] = {}
         self._fit_results: dict[Path, FitResult] = {}
         self._fit_requests: dict[Path, FitRequest] = {}
         self._fit_preferences: dict[
@@ -108,6 +134,8 @@ class DDMMainWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_processing)
         self.video_table.cellChanged.connect(self._video_cell_changed)
         self.matrix_selector.currentIndexChanged.connect(self._matrix_selection_changed)
+        self.merge_button.clicked.connect(self.merge_selected_matrices)
+        self.average_button.clicked.connect(self.average_selected_matrices)
         self.initial_guess_button.clicked.connect(self.edit_initial_guess)
         self.fit_button.clicked.connect(self.start_fitting)
         self.fitted_parameters_button.clicked.connect(self.plot_fitted_parameters)
@@ -115,6 +143,10 @@ class DDMMainWindow(QMainWindow):
         self.plot_amplitude_button.clicked.connect(self.plot_amplitude_noise_diffusion)
         self.show_matrix_action.triggered.connect(self.plot_selected_matrix)
         self.plot_correlation_action.triggered.connect(self.plot_selected_correlation)
+        self.save_matrix_action.triggered.connect(self.export_selected_matrix)
+        self.save_fit_action.triggered.connect(self.export_selected_fit)
+        self.save_correlation_action.triggered.connect(self.export_selected_correlation)
+        self.fit_all_action.triggered.connect(self.start_batch_fitting)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -626,6 +658,324 @@ class DDMMainWindow(QMainWindow):
         )
         return request.initial_values, request.fixed_flags
 
+    def _matrix_catalog_items(self) -> dict[Path, str]:
+        return {
+            path: self._matrix_names.get(path, path.name)
+            for path in self._matrices
+        }
+
+    def _select_matrix_paths(
+        self, *, title: str, selected_paths: Sequence[Path] = ()
+    ) -> tuple[Path, ...] | None:
+        dialog = MatrixSelectionDialog(
+            self._matrix_catalog_items(),
+            selected_paths=selected_paths,
+            title=title,
+            parent=self,
+        )
+        self._matrix_selection_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return None
+        return dialog.selected_paths
+
+    def merge_selected_matrices(self) -> bool:
+        """Merge user-selected matrices after validating them before writing."""
+        return self._combine_selected("merge", merge_ddm)
+
+    def average_selected_matrices(self) -> bool:
+        """Average user-selected matrices after validating them before writing."""
+        return self._combine_selected("average", average_ddm)
+
+    def _combine_selected(self, operation: str, combine) -> bool:
+        selected = self._select_matrix_paths(title=f"Select matrices to {operation}")
+        if selected is None:
+            return False
+        if len(selected) < 2:
+            self.status_label.setText(f"Select at least two matrices to {operation}")
+            return False
+        try:
+            data = combine(self._matrices[path] for path in selected)
+        except (CombinationError, TypeError, ValueError) as error:
+            self.status_label.setText(f"{operation.capitalize()} failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        default_prefix = selected[0].parent / f"{operation}_result"
+        prefix = self._choose_output_prefix(default_prefix, LEGACY_SUFFIXES)
+        if prefix is None:
+            return False
+        try:
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            paths = save_matrix_set(prefix, data)
+        except (OSError, TypeError, ValueError) as error:
+            self.status_label.setText(f"Could not save {operation}: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        self.load_directory_data(
+            Path(self.directory_edit.text()), preferred_matrix_path=paths[0]
+        )
+        self.status_label.setText(f"Saved {operation} matrix: {paths[0].name}")
+        return True
+
+    def _choose_output_prefix(
+        self, default_prefix: Path, suffixes: Sequence[str]
+    ) -> Path | None:
+        dialog = OutputPathDialog(default_prefix, suffixes, parent=self)
+        self._output_path_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return None
+        prefix = dialog.output_prefix
+        if not prefix.is_absolute():
+            prefix = default_prefix.parent / prefix
+        targets = output_target_paths(prefix, suffixes)
+        if not self._confirm_output_targets(targets):
+            return None
+        return prefix
+
+    def _confirm_output_targets(self, targets: Sequence[Path]) -> bool:
+        if not targets:
+            return False
+        existing = tuple(path for path in targets if path.exists())
+        action = "Overwrite" if existing else "Write"
+        details = "\n".join(str(path) for path in targets)
+        message = f"{action} these exact files?\n\n{details}"
+        if existing:
+            message += "\n\nExisting files will be replaced."
+        answer = QMessageBox.question(
+            self,
+            "Confirm output files",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def export_selected_matrix(self) -> bool:
+        """Export the selected matrix using the exact CSV target set."""
+        data = self.selected_matrix
+        path = self._selected_matrix_path
+        if data is None or path is None:
+            self.status_label.setText("No matrix selected")
+            return False
+        default_prefix = path.parent / f"{self._matrix_stem(path)}_export"
+        prefix = self._choose_output_prefix(default_prefix, CSV_SUFFIXES)
+        if prefix is None:
+            return False
+        try:
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            paths = save_matrix_csv(prefix, data)
+        except (OSError, TypeError, ValueError) as error:
+            self.status_label.setText(f"Matrix export failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        self.status_label.setText(f"Exported matrix: {paths[0].name}")
+        return True
+
+    def export_selected_fit(self) -> bool:
+        """Export the selected fit and its physical parameter columns."""
+        fit = self.selected_fit
+        path = self._selected_matrix_path
+        if fit is None or path is None:
+            self.status_label.setText("Fit the selected matrix first")
+            return False
+        try:
+            viscosity, temperature = self._fit_export_conditions()
+        except ValueError as error:
+            self.status_label.setText(f"Fit export failed: {error}")
+            return False
+        prefix = self._choose_output_prefix(path.parent / f"{self._matrix_stem(path)}_fit", (".txt",))
+        if prefix is None:
+            return False
+        output = output_target_paths(prefix, (".txt",))[0]
+        model = get_model(fit.model_id)
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            saved = save_fit_text(
+                output,
+                fit.q_values,
+                fit.amplitude,
+                fit.noise,
+                fit.model_parameters,
+                model.parameter_names[:-2],
+                viscosity=viscosity,
+                temperature=temperature,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            self.status_label.setText(f"Fit export failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        self.status_label.setText(f"Exported fit: {saved.name}")
+        return True
+
+    def export_selected_correlation(self) -> bool:
+        """Export the refined correlation for the q values in the selected fit."""
+        fit = self.selected_fit
+        data = self.selected_matrix
+        path = self._selected_matrix_path
+        if fit is None or data is None or path is None:
+            self.status_label.setText("Fit the selected matrix first")
+            return False
+        prefix = self._choose_output_prefix(
+            path.parent / f"{self._matrix_stem(path)}_correlation",
+            ("_autocorrelationmatrix.csv", "_qs.csv", "_dts.csv"),
+        )
+        if prefix is None:
+            return False
+        try:
+            amplitudes, noises = estimate_amplitude_background(data.matrix)
+            for q_value, amplitude, noise in zip(fit.q_values, fit.amplitude, fit.noise):
+                index = int(np.argmin(np.abs(data.q_values - q_value)))
+                amplitudes[index] = amplitude
+                noises[index] = noise
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            paths = save_autocorrelation_csv(
+                prefix, data, amplitudes, noises, fit.q_values
+            )
+        except (OSError, TypeError, ValueError) as error:
+            self.status_label.setText(f"Correlation export failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        self.status_label.setText(f"Exported correlation: {paths[0].name}")
+        return True
+
+    def _fit_export_conditions(self) -> tuple[float | None, float | None]:
+        temperature_text = self.temperature_edit.text().strip()
+        viscosity_text = self.viscosity_edit.text().strip()
+        if not temperature_text and not viscosity_text:
+            return None, None
+        if not temperature_text and viscosity_text.casefold() == "water":
+            return None, None
+        if not temperature_text or not viscosity_text:
+            raise ValueError("temperature and viscosity must be provided together")
+        try:
+            temperature = float(temperature_text)
+        except ValueError as error:
+            raise ValueError("temperature must be numeric") from error
+        if not isfinite(temperature):
+            raise ValueError("temperature must be finite")
+        if viscosity_text.casefold() == "water":
+            kelvin = temperature + 273.15 if temperature < 150.0 else temperature
+            viscosity = water_viscosity(kelvin)
+        else:
+            try:
+                viscosity = float(viscosity_text)
+            except ValueError as error:
+                raise ValueError("viscosity must be numeric or 'water'") from error
+            if not isfinite(viscosity) or viscosity <= 0:
+                raise ValueError("viscosity must be finite and positive")
+        return viscosity, temperature
+
+    @staticmethod
+    def _matrix_stem(path: Path) -> str:
+        return path.stem.removesuffix("_DDM_matrix")
+
+    def start_batch_fitting(self) -> bool:
+        """Select matrices and run a guarded background fit/export batch."""
+        if self._job_active:
+            return False
+        matrices = self._matrix_catalog_items()
+        if not matrices:
+            self.status_label.setText("No matrices are loaded")
+            return False
+        first_path = next(iter(matrices))
+        dialog = BatchFitDialog(
+            matrices,
+            first_path.parent / "batch_fit",
+            parent=self,
+        )
+        self._batch_fit_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        model_id = self.model_selector.currentData()
+        if not isinstance(model_id, str):
+            self.status_label.setText("No fit model selected")
+            return False
+        try:
+            viscosity, temperature = self._fit_export_conditions()
+            initial_values, fixed_flags = self._initial_guess_state(model_id)
+            fit_request = FitRequest(
+                model_id,
+                initial_values,
+                fixed_flags,
+                FitRange(
+                    self.q_min_slider.value(),
+                    self.q_max_slider.value(),
+                    self.time_min_slider.value(),
+                    self.time_max_slider.value(),
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            self.status_label.setText(f"Batch fit cannot start: {error}")
+            return False
+        prefix = dialog.output_prefix
+        if not prefix.is_absolute():
+            prefix = first_path.parent / prefix
+        try:
+            targets = batch_fit_target_paths(prefix, dialog.selected_paths)
+        except ValueError as error:
+            self.status_label.setText(f"Batch fit cannot start: {error}")
+            return False
+        if not self._confirm_output_targets(targets):
+            return False
+        batch_request = BatchFitRequest(
+            tuple((path, self._matrices[path]) for path in dialog.selected_paths),
+            fit_request,
+            prefix,
+            continue_on_failure=dialog.continue_on_failure,
+            overwrite=any(path.exists() for path in targets),
+            viscosity=viscosity,
+            temperature=temperature,
+        )
+        for path in dialog.selected_paths:
+            self._fit_results.pop(path, None)
+            self._fit_requests.pop(path, None)
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._job_kind = "batch fitting"
+        self._set_job_active(True)
+
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_batch_fit(batch_request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._batch_worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+        return True
+
+    def _batch_worker_result(self, value: object) -> None:
+        if not isinstance(value, BatchFitResult):
+            self._worker_failure("worker returned an invalid batch result", repr(value))
+            return
+        for item in value.fits:
+            if item.matrix_path not in self._matrices:
+                continue
+            self._fit_results[item.matrix_path] = item.fit
+            self._fit_requests[item.matrix_path] = item.fit_request
+        if value.failures:
+            details = "\n".join(f"{path}: {message}" for path, message in value.failures)
+            self.error_details.setPlainText(details)
+            self.error_details.setVisible(True)
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        self.status_label.setText(
+            f"Batch fit complete: {len(value.fits)} succeeded, "
+            f"{len(value.failures)} failed"
+        )
+        self._update_matrix_action_state()
+
     def cancel_processing(self) -> None:
         """Request cooperative cancellation of the active computation."""
         if self._worker is None or not self._job_active:
@@ -725,12 +1075,18 @@ class DDMMainWindow(QMainWindow):
     def _worker_failure(self, message: str, details: str) -> None:
         self.error_details.setPlainText(details)
         self.error_details.setVisible(True)
-        operation = "Fitting" if self._job_kind == "fitting" else "Processing"
+        operation = {
+            "fitting": "Fitting",
+            "batch fitting": "Batch fitting",
+        }.get(self._job_kind, "Processing")
         self.status_label.setText(f"{operation} failed: {message}")
         self.status_label.setToolTip(details)
 
     def _worker_cancelled(self) -> None:
-        operation = "Fitting" if self._job_kind == "fitting" else "Processing"
+        operation = {
+            "fitting": "Fitting",
+            "batch fitting": "Batch fitting",
+        }.get(self._job_kind, "Processing")
         self.status_label.setText(f"{operation} cancelled")
 
     def _thread_finished(self) -> None:
@@ -948,6 +1304,7 @@ class DDMMainWindow(QMainWindow):
     ) -> None:
         names = display_names(matrix_sets)
         self._matrices = dict(matrices)
+        self._matrix_names = {path: name for name, path in names.items()}
         self._fit_results.clear()
         self._fit_requests.clear()
         self.matrix_selector.blockSignals(True)
@@ -971,6 +1328,7 @@ class DDMMainWindow(QMainWindow):
 
     def _clear_matrix_catalog(self) -> None:
         self._matrices = {}
+        self._matrix_names = {}
         self._fit_results.clear()
         self._fit_requests.clear()
         self._selected_matrix_path = None
@@ -1139,9 +1497,9 @@ class DDMMainWindow(QMainWindow):
         self.show_matrix_action.setEnabled(has_matrix)
         self.plot_correlation_action.setEnabled(has_matrix)
         self.save_matrix_action.setEnabled(has_matrix)
-        self.save_fit_action.setEnabled(False)
+        self.save_fit_action.setEnabled(has_fit)
         self.fit_all_action.setEnabled(has_catalog)
-        self.save_correlation_action.setEnabled(False)
+        self.save_correlation_action.setEnabled(has_fit)
         self.contin_action.setEnabled(has_matrix)
 
     def _install_responsive_central_widget(self, content: QWidget) -> None:

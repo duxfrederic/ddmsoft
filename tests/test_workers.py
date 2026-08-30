@@ -11,9 +11,12 @@ from PySide6.QtWidgets import QApplication
 from ddmsoft.engine import ComputationCancelled
 from ddmsoft.fitting import default_fit_request
 from ddmsoft.gui.workers import (
+    BatchFitRequest,
     ComputationWorker,
     FitComputationRequest,
     VideoComputationRequest,
+    batch_fit_target_paths,
+    run_batch_fit,
     run_fit,
     run_video_computation,
 )
@@ -157,6 +160,56 @@ def test_fit_job_retains_matrix_identity_and_inclusive_request(tmp_path):
     assert np.array_equal(result.fit.q_values, data.q_values[1:4])
     assert result.fit.correlation.shape == (5, 3)
     assert progress[-1] == ("fitting", 3, 3)
+
+
+def test_batch_fit_exports_each_matrix_and_prevents_silent_overwrite(tmp_path):
+    first = generate_model_data("stretch")
+    second = generate_model_data("stretch", noise=0.001)
+    request = BatchFitRequest(
+        ((tmp_path / "first_DDM_matrix.npy", first), (tmp_path / "second_DDM_matrix.npy", second)),
+        default_fit_request("stretch", FitRange(0, 3, 0, 6)),
+        tmp_path / "batch",
+    )
+    progress = []
+
+    result = run_batch_fit(request, lambda *value: progress.append(value), lambda: False)
+
+    assert len(result.fits) == 2
+    assert result.failures == ()
+    assert result.output_paths == batch_fit_target_paths(
+        tmp_path / "batch", (path for path, _ in request.matrices)
+    )
+    assert all(path.is_file() for path in result.output_paths)
+    assert progress[-1] == ("complete", 2, 2)
+    with pytest.raises(FileExistsError, match="batch fit output already exists"):
+        run_batch_fit(request, lambda *value: None, lambda: False)
+
+
+def test_batch_fit_can_continue_after_one_matrix_failure(tmp_path, monkeypatch):
+    first = generate_model_data("stretch")
+    second = generate_model_data("stretch")
+    first_path = tmp_path / "bad_DDM_matrix.npy"
+    second_path = tmp_path / "good_DDM_matrix.npy"
+    request = BatchFitRequest(
+        ((first_path, first), (second_path, second)),
+        default_fit_request("stretch", FitRange(0, 3, 0, 6)),
+        tmp_path / "batch",
+    )
+    from ddmsoft.gui import workers
+
+    original = workers.fit_ddm
+
+    def fail_first(data, fit_request, **kwargs):
+        if data is first:
+            raise ValueError("synthetic bad matrix")
+        return original(data, fit_request, **kwargs)
+
+    monkeypatch.setattr(workers, "fit_ddm", fail_first)
+    result = run_batch_fit(request, lambda *value: None, lambda: False)
+
+    assert result.failures == ((first_path, "synthetic bad matrix"),)
+    assert [item.matrix_path for item in result.fits] == [second_path]
+    assert result.output_paths == (tmp_path / "batch_good.txt",)
 
 
 def test_video_job_cancellation_never_commits_partial_outputs(tmp_path, monkeypatch):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,8 +12,8 @@ from threading import Event
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..engine import ComputationCancelled, compute_video_ddm
-from ..fitting import FitCancelled, fit_ddm
-from ..io import LEGACY_SUFFIXES, save_matrix_set
+from ..fitting import FitCancelled, fit_ddm, get_model
+from ..io import LEGACY_SUFFIXES, save_fit_text, save_matrix_set
 from ..models import DDMData, FitRequest, FitResult, VideoMetadata
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -57,6 +57,36 @@ class FitComputationResult:
     matrix_path: Path
     fit_request: FitRequest
     fit: FitResult
+
+
+@dataclass(frozen=True)
+class BatchFitRequest:
+    """Inputs for fitting and exporting a selected set of matrices."""
+
+    matrices: tuple[tuple[Path, DDMData], ...]
+    fit_request: FitRequest
+    output_prefix: Path
+    continue_on_failure: bool = True
+    overwrite: bool = False
+    viscosity: float | None = None
+    temperature: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "matrices",
+            tuple((Path(path), data) for path, data in self.matrices),
+        )
+        object.__setattr__(self, "output_prefix", Path(self.output_prefix))
+
+
+@dataclass(frozen=True)
+class BatchFitResult:
+    """Completed batch fits and per-matrix failures."""
+
+    fits: tuple[FitComputationResult, ...]
+    output_paths: tuple[Path, ...]
+    failures: tuple[tuple[Path, str], ...]
 
 
 class ComputationWorker(QObject):
@@ -195,6 +225,79 @@ def run_fit(
     return FitComputationResult(request.matrix_path, request.fit_request, result)
 
 
+def run_batch_fit(
+    request: BatchFitRequest,
+    progress: ProgressCallback,
+    cancel: CancelCallback,
+) -> BatchFitResult:
+    """Fit and export matrices sequentially with explicit failure policy."""
+    if not request.matrices:
+        raise ValueError("at least one matrix is required")
+    model = get_model(request.fit_request.model_id)
+    targets = batch_fit_target_paths(
+        request.output_prefix, (path for path, _ in request.matrices)
+    )
+    existing = tuple(path for path in targets if path.exists())
+    if existing and not request.overwrite:
+        names = ", ".join(str(path) for path in existing)
+        raise FileExistsError(f"batch fit output already exists: {names}")
+    request.output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    results: list[FitComputationResult] = []
+    output_paths: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    total = len(request.matrices)
+    for index, (matrix_path, data) in enumerate(request.matrices):
+        if cancel():
+            raise FitCancelled("batch fit cancelled")
+        progress(f"batch fitting {matrix_path.name}", index, total)
+        try:
+            fit = fit_ddm(data, request.fit_request, cancel=cancel)
+            target = targets[index]
+            save_fit_text(
+                target,
+                fit.q_values,
+                fit.amplitude,
+                fit.noise,
+                fit.model_parameters,
+                model.parameter_names[:-2],
+                viscosity=request.viscosity,
+                temperature=request.temperature,
+            )
+        except FitCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - batch policy reports each matrix failure
+            failures.append((matrix_path, str(error) or error.__class__.__name__))
+            progress(f"batch failed {matrix_path.name}", index + 1, total)
+            if not request.continue_on_failure:
+                break
+            continue
+        results.append(FitComputationResult(matrix_path, request.fit_request, fit))
+        output_paths.append(target)
+        progress(f"batch complete {matrix_path.name}", index + 1, total)
+    progress("complete", total, total)
+    return BatchFitResult(tuple(results), tuple(output_paths), tuple(failures))
+
+
+def batch_fit_target_paths(
+    output_prefix: str | Path, matrix_paths: Iterable[str | Path]
+) -> tuple[Path, ...]:
+    """Return deterministic, collision-checked text targets for matrix paths."""
+    prefix = Path(output_prefix)
+    if prefix.name.endswith(".txt"):
+        prefix = prefix.with_name(prefix.name[:-4])
+    paths = tuple(
+        prefix.with_name(f"{prefix.name}_{_matrix_stem(path)}.txt") for path in matrix_paths
+    )
+    if len(set(paths)) != len(paths):
+        raise ValueError("batch matrix names produce duplicate fit output paths")
+    return paths
+
+
+def _matrix_stem(path: str | Path) -> str:
+    stem = Path(path).stem
+    return stem.removesuffix("_DDM_matrix")
+
+
 def _output_prefixes(path: Path, sectors: int) -> tuple[Path, ...]:
     prefix = path.parent / "ddm_matrices" / path.stem
     if sectors == 1:
@@ -255,6 +358,12 @@ def _scaled_progress(completed: int, total: int, span: int) -> int:
 
 
 def _stage_label(stage: str) -> str:
+    if stage.startswith("batch fitting "):
+        return f"Fitting {stage.removeprefix('batch fitting ')}"
+    if stage.startswith("batch complete "):
+        return f"Saved fit for {stage.removeprefix('batch complete ')}"
+    if stage.startswith("batch failed "):
+        return f"Fit failed for {stage.removeprefix('batch failed ')}"
     return {
         "loading": "Loading frames",
         "frame_read": "Loading frames",
@@ -268,11 +377,15 @@ def _stage_label(stage: str) -> str:
 
 
 __all__ = [
+    "BatchFitRequest",
+    "BatchFitResult",
     "ComputationResult",
     "ComputationWorker",
     "FitComputationRequest",
     "FitComputationResult",
     "VideoComputationRequest",
+    "batch_fit_target_paths",
+    "run_batch_fit",
     "run_fit",
     "run_video_computation",
 ]
