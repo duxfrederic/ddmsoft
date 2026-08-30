@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 5 are complete. The work was committed separately:
+Work packages 0 through 7 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -8,6 +8,8 @@ Work packages 0 through 5 are complete. The work was committed separately:
 - `51ad485` `feat: add metadata and matrix I/O`
 - `7d8854f` `feat: add OpenCV DDM engine`
 - `f0884eb` `feat: add structured fitting API`
+- `46108f8` `feat: add pure DDM combination workflows`
+- `ad9a5b2` `feat: isolate CONTIN backend`
 
 ## Package 0
 
@@ -90,12 +92,40 @@ Work packages 0 through 5 are complete. The work was committed separately:
 - Added generated-data coverage for every model, inclusive final positions,
   nonzero q-min alignment, fixed values, failure continuation, and cancellation.
 
+## Package 6
+
+- Added pure `DDMData` merge and average operations with copied output arrays,
+  q-grid, matrix-shape, lag-order, overlap, and zero-scaling validation.
+- Added deterministic compatible-lag grouping with one named average result per
+  group; grouping uses lag arrays rather than inferred frame-rate floats.
+- Added array-split-equivalent time-dependent partition ranges that account for
+  every frame and retain each partition's actual start/stop frame metadata.
+- Added sequential partition computation and per-video metadata dispatch, plus
+  I/O-layer saving with legacy partition name tokens.
+- Added tests for input immutability, grouping, invalid axes/lags, zero scaling,
+  frame accounting, per-video metadata, and partition output names.
+
+## Package 7
+
+- Added the Qt-free `ddmsoft.contin` result API, replacing generator-style
+  progress/final-result handling with `run_contin` and a structured
+  `CONTINResult` containing every alpha candidate.
+- Added validated gamma/alpha min/max/count helpers, progress and cooperative
+  cancellation between alpha and optimizer iterations, and minimum-residual
+  selection labeled accurately rather than as an L-curve criterion.
+- Removed GUI-window coupling from the modern CONTIN exporter and corrected
+  candidate-specific amplitude/noise export values.
+- Added optional SI diffusion-rate to hydrodynamic-radius conversion and tests
+  for candidate retention, validation, cancellation, export, and conversion.
+
 ## Verification
 
-- `python -m pytest`: 41 passed after packages 3 through 5.
+- `python -m pytest`: 57 passed after packages 3 through 7.
 - Package 3 was committed as `51ad485`.
 - Package 4 verification passes locally in `7d8854f`.
 - Package 5 verification passes locally in `f0884eb`.
+- Package 6 verification passes locally in `46108f8`.
+- Package 7 verification passes locally in `ad9a5b2`.
 - Package launcher, packaged resource loading, and Qt-free imports were checked.
 - The local environment is Python 3.11.13; the package declares the roadmap's
   Python 3.12 and 3.14 target. Ruff was not installed locally, so CI should run
