@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Native desktop tools for differential dynamic microscopy"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
-license = {text = "GPL-3.0-or-later"}
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{name = "DDMSoft contributors"}]
 dependencies = [
     "numpy",
@@ -17,9 +18,17 @@ dependencies = [
     "opencv-python",
     "PySide6",
 ]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest",
     "pytest-qt",
     "ruff",
@@ -27,6 +36,8 @@ dev = [
 
 [project.scripts]
 ddmsoft = "ddmsoft.__main__:main"
+ddmsoft-benchmark = "ddmsoft.benchmark:main"
+ddmsoft-demo = "ddmsoft.demo:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

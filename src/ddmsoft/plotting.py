@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMainWindow, QSlider, QVBoxLayout, QWidget
 
-from .contin import CONTINResult
+from .contin import CONTINResult, gamma_to_radius
 from .fitting import get_model
 from .models import DDMData, FitRange, FitResult
 
@@ -286,8 +288,17 @@ class FitParameterPlotController(_PlotController):
 class AmplitudeNoiseDiffusionPlotController(_PlotController):
     """Plot amplitude, background noise, and the primary diffusion parameter."""
 
-    def __init__(self, result: FitResult, *, title: str = "Amplitude, noise, diffusion") -> None:
+    def __init__(
+        self,
+        result: FitResult,
+        *,
+        temperature_kelvin: float | None = None,
+        viscosity_pa_s: float | None = None,
+        title: str = "Amplitude, noise, diffusion",
+    ) -> None:
         self.result = result
+        if (temperature_kelvin is None) != (viscosity_pa_s is None):
+            raise ValueError("temperature and viscosity must be provided together")
         model = get_model(result.model_id)
         diffusion_index = next(
             (
@@ -299,13 +310,26 @@ class AmplitudeNoiseDiffusionPlotController(_PlotController):
         )
         diffusion_name = model.physical_parameters[diffusion_index].display_name
         self.diffusion_name = diffusion_name
+        self.radius = None
+        if temperature_kelvin is not None and viscosity_pa_s is not None:
+            self.radius = gamma_to_radius(
+                result.model_parameters[diffusion_index],
+                temperature_kelvin,
+                viscosity_pa_s,
+            ) * 1e9
+            diffusion_name = "Hydrodynamic radius"
         super().__init__(title, Figure(figsize=(11, 4)))
         self.axes = tuple(self.figure.subplots(1, 3))
         self.figure.subplots_adjust(wspace=0.3)
         series = (
             ("Amplitude", result.amplitude),
             ("Background noise", result.noise),
-            (diffusion_name, result.model_parameters[diffusion_index]),
+            (
+                diffusion_name,
+                self.radius
+                if self.radius is not None
+                else result.model_parameters[diffusion_index],
+            ),
         )
         self.lines = tuple(
             axis.semilogx(result.q_values, values, marker="o")[0]
@@ -329,8 +353,15 @@ class AmplitudeNoiseDiffusionPlotController(_PlotController):
 class CONTINPlotController(_PlotController):
     """Interactive CONTIN alpha plot with no module-global state."""
 
-    def __init__(self, result: CONTINResult, *, title: str = "CONTIN") -> None:
+    def __init__(
+        self,
+        result: CONTINResult,
+        *,
+        on_alpha_changed: Callable[[int], None] | None = None,
+        title: str = "CONTIN",
+    ) -> None:
         self.result = result
+        self._on_alpha_changed = on_alpha_changed
         super().__init__(title, Figure(figsize=(11, 5)))
         self.correlation_axis, self.distribution_axis = self.figure.subplots(1, 2)
         self.figure.subplots_adjust(bottom=0.2, wspace=0.28)
@@ -394,6 +425,8 @@ class CONTINPlotController(_PlotController):
         self.distribution_axis.relim()
         self.distribution_axis.autoscale_view()
         self.canvas.draw_idle()
+        if self._on_alpha_changed is not None:
+            self._on_alpha_changed(index)
 
     def _on_key(self, event: object) -> None:
         key = getattr(event, "key", None)

@@ -50,6 +50,8 @@ class DDMData:
         q_values = np.array(self.q_values, dtype=float, copy=True)
         if matrix.ndim != 2:
             raise ValueError("matrix must be two-dimensional")
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError("matrix must contain finite values")
         if lag_times.ndim != 1 or lag_times.size != matrix.shape[0]:
             raise ValueError("lag_times must have one value per matrix row")
         if q_values.ndim != 1 or q_values.size != matrix.shape[1]:

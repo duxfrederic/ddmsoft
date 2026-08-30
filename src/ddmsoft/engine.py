@@ -279,7 +279,6 @@ def compute_ddm(
         _report(progress, "frame_fft", index, frame_count)
 
     averager = RadialAverager(source_frames[0].shape, sectors)
-    increment = 1 if max_couples == 0 else max(1, frame_count // int(max_couples))
     matrices = [
         np.empty((lags.size, averager.q_bin_centers.size), dtype=float)
         for _ in range(sectors)
@@ -287,6 +286,11 @@ def compute_ddm(
     for lag_index, lag in enumerate(lags):
         if _cancel_requested(cancel):
             raise ComputationCancelled("DDM computation cancelled during lag averaging")
+        increment = (
+            1
+            if max_couples == 0
+            else max(1, int(np.ceil((frame_count - int(lag)) / max_couples)))
+        )
         starts = range(0, frame_count - int(lag), increment)
         accumulated = np.zeros(averager.shape, dtype=float)
         used = 0

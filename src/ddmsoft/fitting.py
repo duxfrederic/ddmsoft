@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from math import factorial
 
 import numpy as np
 from scipy.optimize import minimize
 
-from .models import DDMData, FitRequest, FitResult, FitRange
-
+from .models import DDMData, FitRange, FitRequest, FitResult
 
 ModelFunction = Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]
 ProgressCallback = Callable[[int, int], None]
@@ -118,7 +117,7 @@ def _stretched_flow(
 def _double_exponential_flow(
     parameters: np.ndarray, q_values: np.ndarray, times: np.ndarray
 ) -> np.ndarray:
-    diffusion_1, diffusion_2, beta, weight, flow = parameters
+    flow = parameters[4]
     return _double_exponential(parameters[:4], q_values, times) * np.cos(
         _q_times(q_values, times) * flow
     )
@@ -426,13 +425,13 @@ def _cancel_requested(cancel: Callable[[], bool] | object | None) -> bool:
 
 
 __all__ = [
-    "FitCancelled",
     "MODEL_REGISTRY",
+    "FitCancelled",
     "ModelDefinition",
     "ParameterDefinition",
     "default_fit_request",
-    "evaluate_model",
     "estimate_amplitude_background",
+    "evaluate_model",
     "fit_ddm",
     "get_model",
 ]

@@ -11,6 +11,7 @@ from ddmsoft.time_dependent import (
     compute_time_dependent_videos,
     partition_frame_ranges,
 )
+
 from .fixtures import constant_frames
 
 

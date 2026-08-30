@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from itertools import pairwise
 from math import isfinite
 from pathlib import Path
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..combining import CombinationError, average_ddm, merge_ddm
+from ..combining import CombinationError, average_groups, merge_ddm
 from ..contin import CONTINResult, export_contin
 from ..fitting import (
     MODEL_REGISTRY,
@@ -116,6 +117,7 @@ class DDMMainWindow(QMainWindow):
         self._contin_results: dict[tuple[Path, int], CONTINResult] = {}
         self._contin_ranges: dict[tuple[Path, int], FitRange] = {}
         self._contin_save_all: dict[tuple[Path, int], bool] = {}
+        self._contin_selected_indices: dict[tuple[Path, int], int] = {}
         self._selected_contin_key: tuple[Path, int] | None = None
         self._fit_preferences: dict[
             str, tuple[tuple[float | None, ...], tuple[bool, ...]]
@@ -168,6 +170,7 @@ class DDMMainWindow(QMainWindow):
         self.split_action.triggered.connect(self.start_time_dependent_processing)
         self.contin_action.triggered.connect(self.start_contin)
         self.save_contin_action.triggered.connect(self.export_selected_contin)
+        self.about_action.triggered.connect(self.show_about)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -549,6 +552,16 @@ class DDMMainWindow(QMainWindow):
             self.load_directory_data(selected)
         return selected
 
+    def show_about(self) -> None:
+        """Show project credits without starting another event loop."""
+        QMessageBox.about(
+            self,
+            "About DDMSoft",
+            "DDMSoft 0.1.0\n\n"
+            "Differential dynamic microscopy analysis on a modern PySide6 stack.\n"
+            "Originally developed in 2019 at RWTH Aachen University.",
+        )
+
     def load_current_directory(self) -> bool:
         """Load the directory currently shown in the directory field."""
         return self.load_directory_data(self.directory_edit.text())
@@ -714,7 +727,7 @@ class DDMMainWindow(QMainWindow):
 
     def average_selected_matrices(self) -> bool:
         """Average user-selected matrices after validating them before writing."""
-        return self._combine_selected("average", average_ddm)
+        return self._combine_selected("average", average_groups)
 
     def _combine_selected(self, operation: str, combine) -> bool:
         selected = self._select_matrix_paths(title=f"Select matrices to {operation}")
@@ -724,7 +737,7 @@ class DDMMainWindow(QMainWindow):
             self.status_label.setText(f"Select at least two matrices to {operation}")
             return False
         try:
-            data = combine(self._matrices[path] for path in selected)
+            combined = combine(self._matrices[path] for path in selected)
         except (CombinationError, TypeError, ValueError) as error:
             self.status_label.setText(f"{operation.capitalize()} failed: {error}")
             self.status_label.setToolTip(str(error))
@@ -733,9 +746,31 @@ class DDMMainWindow(QMainWindow):
         prefix = self._choose_output_prefix(default_prefix, LEGACY_SUFFIXES)
         if prefix is None:
             return False
+        if operation == "average":
+            results = tuple((item.name, item.data) for item in combined)
+            output_prefixes = tuple(
+                prefix.with_name(f"{prefix.name}_{name}") for name, _ in results
+            )
+            if len(output_prefixes) == 1:
+                output_prefixes = (prefix,)
+            elif not self._confirm_output_targets(
+                tuple(
+                    target
+                    for output_prefix in output_prefixes[1:]
+                    for target in output_target_paths(output_prefix, LEGACY_SUFFIXES)
+                )
+            ):
+                return False
+        else:
+            results = ((operation, combined),)
+            output_prefixes = (prefix,)
         try:
             prefix.parent.mkdir(parents=True, exist_ok=True)
-            paths = save_matrix_set(prefix, data)
+            paths = tuple(
+                path
+                for output_prefix, (_, data) in zip(output_prefixes, results)
+                for path in save_matrix_set(output_prefix, data)
+            )
         except (OSError, TypeError, ValueError) as error:
             self.status_label.setText(f"Could not save {operation}: {error}")
             self.status_label.setToolTip(str(error))
@@ -743,7 +778,8 @@ class DDMMainWindow(QMainWindow):
         self.load_directory_data(
             Path(self.directory_edit.text()), preferred_matrix_path=paths[0]
         )
-        self.status_label.setText(f"Saved {operation} matrix: {paths[0].name}")
+        result_label = "matrices" if len(results) > 1 else "matrix"
+        self.status_label.setText(f"Saved {operation} {result_label}: {paths[0].name}")
         return True
 
     def _choose_output_prefix(
@@ -883,7 +919,7 @@ class DDMMainWindow(QMainWindow):
         if not isfinite(temperature):
             raise ValueError("temperature must be finite")
         if viscosity_text.casefold() == "water":
-            kelvin = temperature + 273.15 if temperature < 150.0 else temperature
+            kelvin = temperature + 273.15
             viscosity = water_viscosity(kelvin)
         else:
             try:
@@ -1221,7 +1257,7 @@ class DDMMainWindow(QMainWindow):
         try:
             viscosity, temperature = self._fit_export_conditions()
             if viscosity is not None and temperature is not None:
-                kelvin = temperature + 273.15 if temperature < 150.0 else temperature
+                kelvin = temperature + 273.15
                 result = result.with_particle_sizes(kelvin, viscosity)
         except ValueError as error:
             self._worker_failure(f"could not convert CONTIN sizes: {error}", str(error))
@@ -1229,9 +1265,13 @@ class DDMMainWindow(QMainWindow):
         key = (value.matrix_path, value.q_index)
         self._contin_results[key] = result
         self._contin_ranges[key] = value.fit_range
+        self._contin_selected_indices[key] = result.selected_index
         self._selected_contin_key = key
         controller = CONTINPlotController(
             result,
+            on_alpha_changed=lambda index: self._contin_selected_indices.__setitem__(
+                key, index
+            ),
             title=f"CONTIN: {value.matrix_path.name}, q index {value.q_index}",
         )
         self._show_plot(controller)
@@ -1257,6 +1297,9 @@ class DDMMainWindow(QMainWindow):
             return False
         output = output_target_paths(prefix, (".txt",))[0]
         try:
+            selected_index = self._contin_selected_indices.get(key, result.selected_index)
+            if selected_index != result.selected_index:
+                result = replace(result, selected_index=selected_index)
             output.parent.mkdir(parents=True, exist_ok=True)
             saved = export_contin(
                 output,
@@ -1617,6 +1660,7 @@ class DDMMainWindow(QMainWindow):
         self._contin_results.clear()
         self._contin_ranges.clear()
         self._contin_save_all.clear()
+        self._contin_selected_indices.clear()
         self._selected_contin_key = None
         self.matrix_selector.blockSignals(True)
         try:
@@ -1645,6 +1689,7 @@ class DDMMainWindow(QMainWindow):
         self._contin_results.clear()
         self._contin_ranges.clear()
         self._contin_save_all.clear()
+        self._contin_selected_indices.clear()
         self._selected_contin_key = None
         self._selected_matrix_path = None
         self.matrix_selector.blockSignals(True)
@@ -1764,7 +1809,19 @@ class DDMMainWindow(QMainWindow):
         if fit is None:
             self.status_label.setText("Fit the selected matrix first")
             return None
-        controller = AmplitudeNoiseDiffusionPlotController(fit)
+        try:
+            viscosity, temperature = self._fit_export_conditions()
+            controller = AmplitudeNoiseDiffusionPlotController(
+                fit,
+                temperature_kelvin=(temperature + 273.15)
+                if temperature is not None and viscosity is not None
+                else None,
+                viscosity_pa_s=viscosity,
+            )
+        except ValueError as error:
+            self.status_label.setText(f"Plotting failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return None
         return self._show_plot(controller)
 
     def _show_plot(self, controller: object) -> object:

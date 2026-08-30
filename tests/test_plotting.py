@@ -7,6 +7,7 @@ from ddmsoft.contin import run_contin
 from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.models import DDMData, FitRange
 from ddmsoft.plotting import (
+    AmplitudeNoiseDiffusionPlotController,
     CONTINPlotController,
     CorrelationPlotController,
     MatrixPlotController,
@@ -79,4 +80,20 @@ def test_matrix_plot_contains_measured_and_fitted_artists(app):
     controller = MatrixPlotController(data, fit=result, fit_range=fit_range)
     assert controller.measured_image is not None
     assert controller.fit_image is not None
+    controller.close()
+
+
+def test_amplitude_plot_can_show_hydrodynamic_radius(app):
+    data = _data()
+    fit_range = FitRange(0, 2, 0, 2)
+    result = fit_ddm(data, default_fit_request("stretch", fit_range))
+    controller = AmplitudeNoiseDiffusionPlotController(
+        result,
+        temperature_kelvin=298.15,
+        viscosity_pa_s=1e-3,
+    )
+
+    assert controller.radius is not None
+    assert controller.axes[2].get_title() == "Hydrodynamic radius"
+    assert np.all(np.asarray(controller.lines[2].get_ydata()) > 0)
     controller.close()

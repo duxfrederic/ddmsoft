@@ -7,11 +7,12 @@ from ddmsoft.fitting import (
     MODEL_REGISTRY,
     FitCancelled,
     default_fit_request,
-    evaluate_model,
     estimate_amplitude_background,
+    evaluate_model,
     fit_ddm,
 )
-from ddmsoft.models import DDMData, FitRange, FitRequest
+from ddmsoft.models import FitRange, FitRequest
+
 from .fixtures import FIT_MODEL_IDS, generate_model_data
 
 
@@ -69,7 +70,7 @@ def test_a_b_estimates_are_aligned_to_nonzero_q_min():
     assert amplitude[2] != amplitude[3]
     assert background[2] != background[3]
 
-    import ddmsoft.fitting as fitting
+    from ddmsoft import fitting
 
     initial_by_q: list[tuple[float, float]] = []
 
@@ -105,7 +106,7 @@ def test_fixed_values_and_caller_owned_inputs_are_preserved():
 
 def test_failed_q_fit_is_reported_and_later_qs_continue(monkeypatch):
     data = generate_model_data("stretch")
-    import ddmsoft.fitting as fitting
+    from ddmsoft import fitting
 
     original = fitting.minimize
     calls = 0

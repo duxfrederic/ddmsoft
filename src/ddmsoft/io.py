@@ -7,15 +7,14 @@ the original application remain the persistence format:
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
 from .models import DDMData, VideoMetadata
 from .science import stokes_einstein_radius
-
 
 LEGACY_SUFFIXES = ("_DDM_matrix.npy", "_deltaTs.npy", "_QS.npy")
 CSV_SUFFIXES = ("_DDM_matrix.csv", "_deltaTs.csv", "_QS.csv")
@@ -345,8 +344,8 @@ def save_partitioned_matrix_sets(
     paths: list[Path] = []
     prefix = Path(output_prefix)
     for result in results:
-        start_frame = getattr(result, "start_frame")
-        data = getattr(result, "data")
+        start_frame = result.start_frame
+        data = result.data
         datasets = (data,) if isinstance(data, DDMData) else tuple(data)
         partition_prefix = prefix.with_name(f"{prefix.name}__i={start_frame}__")
         if len(datasets) == 1:
@@ -424,7 +423,7 @@ def save_fit_text(
     if (viscosity is None) != (temperature is None):
         raise ValueError("viscosity and temperature must be provided together")
     if viscosity is not None and temperature is not None:
-        temperature_kelvin = temperature + 273.15 if temperature < 150.0 else temperature
+        temperature_kelvin = temperature + 273.15
         radius = np.asarray(
             [
                 stokes_einstein_radius(value, temperature_kelvin, viscosity) * 1e9
@@ -456,13 +455,13 @@ save_fit = save_fit_text
 
 
 __all__ = [
-    "AmbiguousMetadataError",
     "CSV_SUFFIXES",
-    "DDMIOError",
     "DDM_MATRICES_DIRECTORY",
+    "LEGACY_SUFFIXES",
+    "AmbiguousMetadataError",
+    "DDMIOError",
     "IncompleteMatrixError",
     "InvalidMetadataError",
-    "LEGACY_SUFFIXES",
     "MatrixError",
     "MatrixFileSet",
     "MatrixLoadError",

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 
-
 BOLTZMANN_CONSTANT = 1.380649e-23  # J/K
 
 

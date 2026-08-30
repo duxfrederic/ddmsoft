@@ -338,6 +338,12 @@ def test_fit_workflow_uses_worker_range_and_keeps_modeless_plots_independent(qap
     assert len(parameter_plot.parameter_lines) == 4
     assert len(amplitude_plot.lines) == 3
 
+    window.temperature_edit.setText("25")
+    radius_plot = window.plot_amplitude_noise_diffusion()
+    assert isinstance(radius_plot, AmplitudeNoiseDiffusionPlotController)
+    assert radius_plot.radius is not None
+    assert radius_plot.axes[2].get_title() == "Hydrodynamic radius"
+
     old_value = window.q_min_slider.value()
     window.q_min_slider.setValue(0)
     assert window.q_min_slider.value() != old_value
@@ -415,6 +421,38 @@ def test_average_refreshes_matrix_catalog_and_rejects_incompatible_inputs(
     window.close()
 
 
+def test_average_writes_one_matrix_set_per_compatible_lag_group(qapp, tmp_path, monkeypatch):
+    root = _legacy_directory(tmp_path, "first", q_count=3, time_count=3)
+    _write_dataset(root, "second", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    selected = tuple(window._matrices)
+    output_prefix = root / "ddm_matrices" / "average_result"
+    confirmed: list[tuple] = []
+    monkeypatch.setattr(window, "_select_matrix_paths", lambda **kwargs: selected)
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+    monkeypatch.setattr(
+        window,
+        "_confirm_output_targets",
+        lambda targets: confirmed.append(tuple(targets)) or True,
+    )
+
+    assert window.average_selected_matrices()
+    first_matrix = output_prefix.with_name(
+        f"{output_prefix.name}_average_0_DDM_matrix.npy"
+    )
+    second_matrix = output_prefix.with_name(
+        f"{output_prefix.name}_average_1_DDM_matrix.npy"
+    )
+    assert first_matrix.is_file()
+    assert second_matrix.is_file()
+    assert confirmed
+    assert window.selected_matrix_path == first_matrix
+    window.close()
+
+
 def test_merge_refreshes_matrix_catalog_after_successful_write(qapp, tmp_path, monkeypatch):
     root = _metadata_only_directory(tmp_path, "fast")
     fast = generate_model_data("stretch")
@@ -477,6 +515,39 @@ def test_exports_write_expected_dimensions_and_headers(qapp, tmp_path, monkeypat
     assert matrix_csv.shape == data.matrix.shape
     assert correlation_csv.shape == data.matrix.shape
     assert fit_lines[0] == "q [m^-1]\tA\tB\tdiffusion\tstretch"
+    window.close()
+
+
+def test_unwritable_export_is_reported_without_crashing(qapp, tmp_path, monkeypatch):
+    root = _legacy_directory(tmp_path, "sample", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: tmp_path / "blocked")
+
+    def permission_denied(*args, **kwargs):
+        raise PermissionError("synthetic unwritable output")
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.save_matrix_csv", permission_denied)
+
+    assert not window.export_selected_matrix()
+    assert "synthetic unwritable output" in window.status_label.text()
+    window.close()
+
+
+def test_about_action_shows_native_credits_dialog(qapp, monkeypatch):
+    window = DDMMainWindow()
+    calls = []
+    monkeypatch.setattr(
+        "ddmsoft.gui.main_window.QMessageBox.about",
+        lambda *args: calls.append(args),
+    )
+
+    window.about_action.trigger()
+
+    assert calls
+    assert calls[0][1] == "About DDMSoft"
     window.close()
 
 
@@ -620,13 +691,48 @@ def test_contin_main_window_keeps_independent_result_and_exports_candidates(
     window._contin_worker_result(value)
 
     assert window.selected_contin is result
-    assert isinstance(window._plot_controllers[-1], CONTINPlotController)
+    controller = window._plot_controllers[-1]
+    assert isinstance(controller, CONTINPlotController)
+    controller.set_alpha_index(1)
     output_prefix = tmp_path / "contin_export"
     monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
     assert window.export_selected_contin()
     output = output_prefix.with_suffix(".txt")
     assert output.is_file()
     assert output.read_text(encoding="utf-8").count("\nalpha:") == 2
+    window.close()
+
+
+def test_contin_selected_alpha_is_used_for_selected_export(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    data = generate_model_data("stretch")
+    write_legacy_matrix(root, "sample", data)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    path = window.selected_matrix_path
+    result = run_contin(
+        np.linspace(0.01, 0.2, data.matrix.shape[0]),
+        np.linspace(0.1, 0.8, data.matrix.shape[0]),
+        np.linspace(1.0, 5.0, 5),
+        alpha=(0.01, 0.1),
+        maxiter=1,
+    )
+    window._contin_save_all[(path, 1)] = False
+    window._contin_worker_result(
+        CONTINComputationResult(path, 1, FitRange(0, 3, 0, 6), result)
+    )
+    controller = window._plot_controllers[-1]
+    assert isinstance(controller, CONTINPlotController)
+    controller.set_alpha_index(1)
+    output_prefix = tmp_path / "selected_contin_export"
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+
+    assert window.export_selected_contin()
+    text = output_prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert text.count("\nalpha:") == 1
+    assert f"selected alpha:\t{result.alphas[1]:.03e}" in text
     window.close()
 
 
