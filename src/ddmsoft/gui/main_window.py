@@ -1462,14 +1462,20 @@ class DDMMainWindow(QMainWindow):
         self._settings.setValue("last_directory", str(root))
 
         metadata_error: DDMIOError | None = None
-        try:
-            metadata = load_directory(root)
-        except DDMIOError as error:
+        if root.is_dir() and not any(
+            path.is_file() and path.suffix.lower() == ".avi" for path in root.iterdir()
+        ):
             metadata = {}
-            metadata_error = error
-            self._populate_invalid_video_rows(root, error)
-        else:
             self._populate_video_table(metadata)
+        else:
+            try:
+                metadata = load_directory(root)
+            except DDMIOError as error:
+                metadata = {}
+                metadata_error = error
+                self._populate_invalid_video_rows(root, error)
+            else:
+                self._populate_video_table(metadata)
 
         try:
             matrix_sets = discover_matrix_sets(root, strict=False)

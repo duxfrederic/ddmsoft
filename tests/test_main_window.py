@@ -117,6 +117,25 @@ def test_load_directory_populates_metadata_and_matrix_catalog(qapp, tmp_path, mo
     window.close()
 
 
+def test_load_matrix_only_directory_populates_matrix_catalog(qapp, tmp_path):
+    root = tmp_path / "matrix_archive"
+    root.mkdir()
+    data = generate_model_data("stretch")
+    write_legacy_matrix(root, "archived", data)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+
+    assert window.load_directory_data(root)
+    matrix_path = root / "ddm_matrices" / "archived_DDM_matrix.npy"
+    assert window.video_table.rowCount() == 0
+    assert window.matrix_selector.count() == 2
+    assert window.matrix_selector.itemData(1) == matrix_path
+    assert window.selected_matrix_path == matrix_path
+    assert "1 matrix/matrices" in window.status_label.text()
+    window.close()
+
+
 def test_invalid_metadata_edits_are_retained_and_block_processing(qapp, tmp_path):
     root = _legacy_directory(tmp_path, "sample")
     window = DDMMainWindow(

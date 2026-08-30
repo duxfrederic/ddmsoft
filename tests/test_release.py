@@ -60,6 +60,20 @@ def test_unicode_space_paths_and_read_only_inputs_remain_loadable(tmp_path):
     assert np.array_equal(loaded.matrix, arrays[0])
 
 
+def test_legacy_directional_matrix_with_empty_bins_remains_loadable(tmp_path):
+    root = tmp_path / "directional"
+    matrix_directory = root / "ddm_matrices"
+    matrix_directory.mkdir(parents=True)
+    matrix = np.array([[1.0, np.nan], [2.0, 3.0]])
+    np.save(matrix_directory / "sample_0.0__DDM_matrix.npy", matrix)
+    np.save(matrix_directory / "sample_0.0__deltaTs.npy", np.array([0.1, 0.2]))
+    np.save(matrix_directory / "sample_0.0__QS.npy", np.array([1.0, 2.0]))
+
+    loaded = load_matrices(root)
+
+    assert np.isnan(loaded[next(iter(loaded))].matrix[0, 1])
+
+
 def test_corrupt_matrix_and_video_fail_descriptively(tmp_path):
     root = tmp_path / "corrupt"
     matrix_directory = root / "ddm_matrices"
