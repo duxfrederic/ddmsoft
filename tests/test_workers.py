@@ -9,12 +9,17 @@ from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QApplication
 
 from ddmsoft.engine import ComputationCancelled
+from ddmsoft.fitting import default_fit_request
 from ddmsoft.gui.workers import (
     ComputationWorker,
+    FitComputationRequest,
     VideoComputationRequest,
+    run_fit,
     run_video_computation,
 )
-from ddmsoft.models import DDMData, VideoMetadata
+from ddmsoft.models import DDMData, FitRange, VideoMetadata
+
+from .fixtures import generate_model_data
 
 
 @pytest.fixture
@@ -133,6 +138,25 @@ def test_video_job_keeps_existing_sets_and_requires_recompute_to_replace(tmp_pat
     assert all(path.exists() for path in first.paths)
     for progress in (first_progress, second_progress, replaced_progress):
         assert [value[1] for value in progress] == sorted(value[1] for value in progress)
+
+
+def test_fit_job_retains_matrix_identity_and_inclusive_request(tmp_path):
+    data = generate_model_data("stretch")
+    matrix_path = tmp_path / "first_DDM_matrix.npy"
+    fit_request = FitComputationRequest(
+        matrix_path,
+        data,
+        default_fit_request("stretch", FitRange(1, 3, 2, 6)),
+    )
+    progress = []
+
+    result = run_fit(fit_request, lambda *value: progress.append(value), lambda: False)
+
+    assert result.matrix_path == matrix_path
+    assert result.fit_request.fit_range == FitRange(1, 3, 2, 6)
+    assert np.array_equal(result.fit.q_values, data.q_values[1:4])
+    assert result.fit.correlation.shape == (5, 3)
+    assert progress[-1] == ("fitting", 3, 3)
 
 
 def test_video_job_cancellation_never_commits_partial_outputs(tmp_path, monkeypatch):

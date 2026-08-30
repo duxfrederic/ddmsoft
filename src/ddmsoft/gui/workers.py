@@ -12,8 +12,9 @@ from threading import Event
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..engine import ComputationCancelled, compute_video_ddm
+from ..fitting import FitCancelled, fit_ddm
 from ..io import LEGACY_SUFFIXES, save_matrix_set
-from ..models import DDMData, VideoMetadata
+from ..models import DDMData, FitRequest, FitResult, VideoMetadata
 
 ProgressCallback = Callable[[str, int, int], None]
 CancelCallback = Callable[[], bool]
@@ -38,6 +39,24 @@ class ComputationResult:
     paths: tuple[Path, ...]
     processed_videos: tuple[Path, ...]
     kept_videos: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class FitComputationRequest:
+    """Plain inputs for one matrix-fitting job."""
+
+    matrix_path: Path
+    data: DDMData
+    fit_request: FitRequest
+
+
+@dataclass(frozen=True)
+class FitComputationResult:
+    """A fit result retaining the matrix identity and request that produced it."""
+
+    matrix_path: Path
+    fit_request: FitRequest
+    fit: FitResult
 
 
 class ComputationWorker(QObject):
@@ -70,7 +89,7 @@ class ComputationWorker(QObject):
                 self.cancelled.emit()
             else:
                 self.result.emit(value)
-        except ComputationCancelled:
+        except (ComputationCancelled, FitCancelled):
             self.cancelled.emit()
         except Exception as error:  # noqa: BLE001 - workers must relay all failures
             message = str(error) or error.__class__.__name__
@@ -159,6 +178,23 @@ def run_video_computation(
     return ComputationResult(tuple(paths), tuple(processed), tuple(kept))
 
 
+def run_fit(
+    request: FitComputationRequest,
+    progress: ProgressCallback,
+    cancel: CancelCallback,
+) -> FitComputationResult:
+    """Fit a selected matrix while retaining its stable catalog identity."""
+    if not request.matrix_path:
+        raise ValueError("matrix_path is required")
+    result = fit_ddm(
+        request.data,
+        request.fit_request,
+        progress=lambda completed, total: progress("fitting", completed, total),
+        cancel=cancel,
+    )
+    return FitComputationResult(request.matrix_path, request.fit_request, result)
+
+
 def _output_prefixes(path: Path, sectors: int) -> tuple[Path, ...]:
     prefix = path.parent / "ddm_matrices" / path.stem
     if sectors == 1:
@@ -226,6 +262,7 @@ def _stage_label(stage: str) -> str:
         "lag_average": "Temporal averaging",
         "saving": "Saving DDM matrices",
         "keeping": "Keeping existing matrices",
+        "fitting": "Fitting correlation curves",
         "complete": "Computation complete",
     }.get(stage, stage.replace("_", " ").capitalize())
 
@@ -233,6 +270,9 @@ def _stage_label(stage: str) -> str:
 __all__ = [
     "ComputationResult",
     "ComputationWorker",
+    "FitComputationRequest",
+    "FitComputationResult",
     "VideoComputationRequest",
+    "run_fit",
     "run_video_computation",
 ]

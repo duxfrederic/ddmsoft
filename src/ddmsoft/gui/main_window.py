@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..fitting import MODEL_REGISTRY
+from ..fitting import MODEL_REGISTRY, default_fit_request, get_model
 from ..io import (
     DDMIOError,
     MatrixFileSet,
@@ -42,11 +42,21 @@ from ..io import (
     load_directory,
     load_matrices,
 )
-from ..models import DDMData, VideoMetadata
+from ..models import DDMData, FitRange, FitRequest, FitResult, VideoMetadata
+from ..plotting import (
+    AmplitudeNoiseDiffusionPlotController,
+    CorrelationPlotController,
+    FitParameterPlotController,
+    MatrixPlotController,
+)
+from .fit_dialog import InitialGuessDialog
 from .workers import (
     ComputationResult,
     ComputationWorker,
+    FitComputationRequest,
+    FitComputationResult,
     VideoComputationRequest,
+    run_fit,
     run_video_computation,
 )
 
@@ -63,11 +73,18 @@ class DDMMainWindow(QMainWindow):
         self._q_values: tuple[float, ...] = ()
         self._lag_times: tuple[float, ...] = ()
         self._matrices: dict[Path, DDMData] = {}
+        self._fit_results: dict[Path, FitResult] = {}
+        self._fit_requests: dict[Path, FitRequest] = {}
+        self._fit_preferences: dict[
+            str, tuple[tuple[float | None, ...], tuple[bool, ...]]
+        ] = {}
+        self._plot_controllers: list[object] = []
         self._updating_video_table = False
         self._selected_matrix_path: Path | None = None
         self._thread: QThread | None = None
         self._worker: ComputationWorker | None = None
         self._job_active = False
+        self._job_kind: str | None = None
         self._progress_value = 0
 
         self._build_menus()
@@ -91,6 +108,13 @@ class DDMMainWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_processing)
         self.video_table.cellChanged.connect(self._video_cell_changed)
         self.matrix_selector.currentIndexChanged.connect(self._matrix_selection_changed)
+        self.initial_guess_button.clicked.connect(self.edit_initial_guess)
+        self.fit_button.clicked.connect(self.start_fitting)
+        self.fitted_parameters_button.clicked.connect(self.plot_fitted_parameters)
+        self.plot_matrix_button.clicked.connect(self.plot_selected_matrix)
+        self.plot_amplitude_button.clicked.connect(self.plot_amplitude_noise_diffusion)
+        self.show_matrix_action.triggered.connect(self.plot_selected_matrix)
+        self.plot_correlation_action.triggered.connect(self.plot_selected_correlation)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -491,6 +515,7 @@ class DDMMainWindow(QMainWindow):
         self._progress_value = 0
         self.progress_bar.setValue(0)
         self._job_active = True
+        self._job_kind = "processing"
         self._set_job_active(True)
 
         thread = QThread(self)
@@ -510,6 +535,96 @@ class DDMMainWindow(QMainWindow):
         self._thread = thread
         self._worker = worker
         thread.start()
+
+    def edit_initial_guess(self) -> bool:
+        """Edit and retain the initial values for the selected model."""
+        model_id = self.model_selector.currentData()
+        if not isinstance(model_id, str):
+            self.status_label.setText("Select a fit model first")
+            return False
+        model = get_model(model_id)
+        values, fixed = self._initial_guess_state(model_id)
+        dialog = InitialGuessDialog(model, values, fixed, parent=self)
+        self._initial_guess_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        self._fit_preferences[model_id] = (dialog.initial_values, dialog.fixed_flags)
+        self.status_label.setText(f"Initial guess saved for {model.display_name}")
+        return True
+
+    def start_fitting(self) -> None:
+        """Fit the selected matrix over the current inclusive slider ranges."""
+        if self._job_active:
+            return
+        path = self._selected_matrix_path
+        data = self.selected_matrix
+        try:
+            request = self.current_fit_request()
+        except (TypeError, ValueError) as error:
+            self.status_label.setText(str(error))
+            self.status_label.setToolTip(str(error))
+            return
+        if path is None or data is None:
+            self.status_label.setText("No matrix selected")
+            return
+
+        computation_request = FitComputationRequest(path, data, request)
+        self._fit_results.pop(path, None)
+        self._fit_requests.pop(path, None)
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._job_kind = "fitting"
+        self._set_job_active(True)
+
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_fit(computation_request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._fit_worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def current_fit_request(self) -> FitRequest:
+        """Build the current model request from the UI state."""
+        data = self.selected_matrix
+        model_id = self.model_selector.currentData()
+        if data is None:
+            raise ValueError("no matrix selected")
+        if not isinstance(model_id, str):
+            raise TypeError("no fit model selected")
+        fit_range = FitRange(
+            self.q_min_slider.value(),
+            self.q_max_slider.value(),
+            self.time_min_slider.value(),
+            self.time_max_slider.value(),
+        )
+        values, fixed = self._initial_guess_state(model_id)
+        return FitRequest(model_id, values, fixed, fit_range)
+
+    def _initial_guess_state(
+        self, model_id: str
+    ) -> tuple[tuple[float | None, ...], tuple[bool, ...]]:
+        state = self._fit_preferences.get(model_id)
+        if state is not None:
+            return state
+        request = default_fit_request(
+            model_id,
+            FitRange(0, 0, 0, 0),
+        )
+        return request.initial_values, request.fixed_flags
 
     def cancel_processing(self) -> None:
         """Request cooperative cancellation of the active computation."""
@@ -590,19 +705,39 @@ class DDMMainWindow(QMainWindow):
             f"kept {len(value.kept_videos)} existing set(s)"
         )
 
+    def _fit_worker_result(self, value: object) -> None:
+        if not isinstance(value, FitComputationResult):
+            self._worker_failure("worker returned an invalid fit result", repr(value))
+            return
+        if value.matrix_path != self._selected_matrix_path:
+            self.status_label.setText("Ignored a fit result for a different matrix")
+            return
+        self._fit_results[value.matrix_path] = value.fit
+        self._fit_requests[value.matrix_path] = value.fit_request
+        failed = sum(not status for status in value.fit.convergence_status)
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        self.status_label.setText(
+            f"Fit complete for {value.matrix_path.name}; {failed} q fit(s) did not converge"
+        )
+        self._update_matrix_action_state()
+
     def _worker_failure(self, message: str, details: str) -> None:
         self.error_details.setPlainText(details)
         self.error_details.setVisible(True)
-        self.status_label.setText(f"Processing failed: {message}")
+        operation = "Fitting" if self._job_kind == "fitting" else "Processing"
+        self.status_label.setText(f"{operation} failed: {message}")
         self.status_label.setToolTip(details)
 
     def _worker_cancelled(self) -> None:
-        self.status_label.setText("Processing cancelled")
+        operation = "Fitting" if self._job_kind == "fitting" else "Processing"
+        self.status_label.setText(f"{operation} cancelled")
 
     def _thread_finished(self) -> None:
         self._thread = None
         self._worker = None
         self._job_active = False
+        self._job_kind = None
         self._set_job_active(False)
         self._update_processing_state()
         self._update_matrix_action_state()
@@ -813,6 +948,8 @@ class DDMMainWindow(QMainWindow):
     ) -> None:
         names = display_names(matrix_sets)
         self._matrices = dict(matrices)
+        self._fit_results.clear()
+        self._fit_requests.clear()
         self.matrix_selector.blockSignals(True)
         try:
             self.matrix_selector.clear()
@@ -834,6 +971,8 @@ class DDMMainWindow(QMainWindow):
 
     def _clear_matrix_catalog(self) -> None:
         self._matrices = {}
+        self._fit_results.clear()
+        self._fit_requests.clear()
         self._selected_matrix_path = None
         self.matrix_selector.blockSignals(True)
         try:
@@ -854,7 +993,8 @@ class DDMMainWindow(QMainWindow):
             self.status_label.setText("No matrix selected")
         else:
             self.set_axis_values(data.q_values, data.lag_times)
-            self.status_label.setText(f"Selected matrix: {path.name}")
+            fit_status = "; fit available" if path in self._fit_results else ""
+            self.status_label.setText(f"Selected matrix: {path.name}{fit_status}")
         self._update_matrix_action_state()
 
     @property
@@ -870,6 +1010,80 @@ class DDMMainWindow(QMainWindow):
     def selected_matrix_path(self) -> Path | None:
         """Return the full path backing the selected matrix display name."""
         return self._selected_matrix_path
+
+    @property
+    def selected_fit(self) -> FitResult | None:
+        """Return the fit attached to the selected full matrix path, if any."""
+        return (
+            self._fit_results.get(self._selected_matrix_path)
+            if self._selected_matrix_path is not None
+            else None
+        )
+
+    @property
+    def selected_fit_range(self) -> FitRange | None:
+        """Return the inclusive range used by the selected fit, if any."""
+        request = (
+            self._fit_requests.get(self._selected_matrix_path)
+            if self._selected_matrix_path is not None
+            else None
+        )
+        return request.fit_range if request is not None else None
+
+    def plot_selected_matrix(self) -> object | None:
+        """Open an independent measured/fitted matrix window."""
+        data = self.selected_matrix
+        if data is None:
+            self.status_label.setText("No matrix selected")
+            return None
+        fit = self.selected_fit
+        fit_range = self.selected_fit_range if fit is not None else self.current_fit_request().fit_range
+        controller = MatrixPlotController(
+            data,
+            fit=fit,
+            fit_range=fit_range if fit is not None else None,
+            title=f"DDM matrix: {self._selected_matrix_path.name}",
+        )
+        return self._show_plot(controller)
+
+    def plot_selected_correlation(self) -> object | None:
+        """Open an independent measured/fitted correlation window."""
+        data = self.selected_matrix
+        if data is None:
+            self.status_label.setText("No matrix selected")
+            return None
+        fit = self.selected_fit
+        fit_range = self.selected_fit_range if fit is not None else self.current_fit_request().fit_range
+        controller = CorrelationPlotController(
+            data,
+            fit=fit,
+            fit_range=fit_range,
+            title=f"DDM correlation: {self._selected_matrix_path.name}",
+        )
+        return self._show_plot(controller)
+
+    def plot_fitted_parameters(self) -> object | None:
+        """Open an independent plot of all parameters from the selected fit."""
+        fit = self.selected_fit
+        if fit is None:
+            self.status_label.setText("Fit the selected matrix first")
+            return None
+        controller = FitParameterPlotController(fit)
+        return self._show_plot(controller)
+
+    def plot_amplitude_noise_diffusion(self) -> object | None:
+        """Open independent amplitude, noise, and diffusion plots."""
+        fit = self.selected_fit
+        if fit is None:
+            self.status_label.setText("Fit the selected matrix first")
+            return None
+        controller = AmplitudeNoiseDiffusionPlotController(fit)
+        return self._show_plot(controller)
+
+    def _show_plot(self, controller: object) -> object:
+        self._plot_controllers.append(controller)
+        controller.show()
+        return controller
 
     def _update_matrix_action_state(self) -> None:
         if self._job_active:
@@ -906,6 +1120,7 @@ class DDMMainWindow(QMainWindow):
         has_matrix = self.selected_matrix is not None
         has_catalog = bool(self._matrices)
         has_multiple = len(self._matrices) > 1
+        has_fit = self.selected_fit is not None
         for widget in (
             self.model_selector,
             self.q_min_slider,
@@ -914,11 +1129,11 @@ class DDMMainWindow(QMainWindow):
             self.time_max_slider,
             self.initial_guess_button,
             self.fit_button,
-            self.fitted_parameters_button,
             self.plot_matrix_button,
-            self.plot_amplitude_button,
         ):
             widget.setEnabled(has_matrix)
+        self.fitted_parameters_button.setEnabled(has_fit)
+        self.plot_amplitude_button.setEnabled(has_fit)
         self.merge_button.setEnabled(has_multiple)
         self.average_button.setEnabled(has_multiple)
         self.show_matrix_action.setEnabled(has_matrix)
@@ -1071,6 +1286,9 @@ class DDMMainWindow(QMainWindow):
             self._job_active = False
             self._thread = None
             self._worker = None
+        for controller in tuple(self._plot_controllers):
+            controller.close()
+        self._plot_controllers.clear()
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("last_directory", self.directory_edit.text())
         self._settings.sync()

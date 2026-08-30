@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMainWindow, QSlider, QVBoxLayout, QWidget
 
 from .contin import CONTINResult
+from .fitting import get_model
 from .models import DDMData, FitRange, FitResult
 
 
@@ -253,6 +254,78 @@ class MatrixPlotController(_PlotController):
         self.fit_axis.set_xlabel("q [m^-1]")
 
 
+class FitParameterPlotController(_PlotController):
+    """Plot every fitted parameter against q, including failed-q diagnostics."""
+
+    def __init__(self, result: FitResult, *, title: str = "Fitted parameters") -> None:
+        self.result = result
+        model = get_model(result.model_id)
+        super().__init__(title, Figure(figsize=(9, 5)))
+        self.axis = self.figure.subplots()
+        self.figure.subplots_adjust(bottom=0.16)
+        self.parameter_names = tuple(
+            parameter.display_name for parameter in model.parameters[:-2]
+        ) + ("Amplitude", "Background")
+        values = (*result.model_parameters, result.amplitude, result.noise)
+        self.parameter_lines = tuple(
+            self.axis.semilogx(result.q_values, values[index], marker="o", label=name)[0]
+            for index, name in enumerate(self.parameter_names)
+        )
+        failed = result.q_values[~np.asarray(result.convergence_status, dtype=bool)]
+        self.failed_q_values = failed
+        self.failed_markers = tuple(
+            self.axis.axvline(q_value, color="#b00020", ls=":", alpha=0.7)
+            for q_value in failed
+        )
+        self.axis.set_xlabel("q [m^-1]")
+        self.axis.set_ylabel("parameter value")
+        self.axis.set_title("Fitted parameters")
+        self.axis.legend(frameon=False)
+
+
+class AmplitudeNoiseDiffusionPlotController(_PlotController):
+    """Plot amplitude, background noise, and the primary diffusion parameter."""
+
+    def __init__(self, result: FitResult, *, title: str = "Amplitude, noise, diffusion") -> None:
+        self.result = result
+        model = get_model(result.model_id)
+        diffusion_index = next(
+            (
+                index
+                for index, parameter in enumerate(model.physical_parameters)
+                if parameter.identifier.startswith("diffusion")
+            ),
+            0,
+        )
+        diffusion_name = model.physical_parameters[diffusion_index].display_name
+        self.diffusion_name = diffusion_name
+        super().__init__(title, Figure(figsize=(11, 4)))
+        self.axes = tuple(self.figure.subplots(1, 3))
+        self.figure.subplots_adjust(wspace=0.3)
+        series = (
+            ("Amplitude", result.amplitude),
+            ("Background noise", result.noise),
+            (diffusion_name, result.model_parameters[diffusion_index]),
+        )
+        self.lines = tuple(
+            axis.semilogx(result.q_values, values, marker="o")[0]
+            for axis, (_, values) in zip(self.axes, series)
+        )
+        for axis, (label, _) in zip(self.axes, series):
+            axis.set_title(label)
+            axis.set_xlabel("q [m^-1]")
+            axis.set_ylabel(label)
+        failed = result.q_values[~np.asarray(result.convergence_status, dtype=bool)]
+        self.failed_q_values = failed
+        self.failed_markers = tuple(
+            tuple(
+                axis.axvline(q_value, color="#b00020", ls=":", alpha=0.7)
+                for axis in self.axes
+            )
+            for q_value in failed
+        )
+
+
 class CONTINPlotController(_PlotController):
     """Interactive CONTIN alpha plot with no module-global state."""
 
@@ -344,9 +417,11 @@ CONTINController = CONTINPlotController
 
 
 __all__ = [
+    "AmplitudeNoiseDiffusionPlotController",
     "CONTINController",
     "CONTINPlotController",
     "CorrelationPlotController",
     "DDMPlotController",
+    "FitParameterPlotController",
     "MatrixPlotController",
 ]

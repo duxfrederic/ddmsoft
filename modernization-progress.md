@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 11 are complete. The work was committed separately:
+Work packages 0 through 12 are complete. Earlier packages were committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -203,3 +203,21 @@ Work packages 0 through 11 are complete. The work was committed separately:
   Python 3.14.7 in the `ddmsoft` environment.
 
 The untracked `roadmap.md` is user-provided and was intentionally not committed.
+
+## Package 12
+
+- Added a registry-generated initial-guess dialog with finite numeric validation,
+  fixed flags, automatic amplitude/background estimates, and per-model session
+  state.
+- Added fit jobs to the Qt worker system, retaining the full matrix path,
+  inclusive `FitRange`, and structured `FitResult` together.  Stale results for
+  a previously selected matrix are ignored and failed q fits remain visible.
+- Wired measured/fitted matrix and correlation plots before and after fitting,
+  preserving the exact fit range for both fit curves and range markers.
+- Added independent fitted-parameter and amplitude/noise/primary-diffusion
+  plot controllers without blocking the main-window sliders.
+- Added offscreen coverage for dialog validation, fit-worker identity and
+  progress, the complete inspect/fit/plot workflow, and stale-result handling.
+- Package 12 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
+  python -m pytest` passed with 81 tests; scoped Ruff, bytecode compilation,
+  and `git diff --check` passed.

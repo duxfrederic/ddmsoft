@@ -8,10 +8,19 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from ddmsoft.engine import ComputationCancelled
+from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.gui.main_window import DDMMainWindow
-from ddmsoft.gui.workers import ComputationResult
+from ddmsoft.gui.workers import ComputationResult, FitComputationResult
 from ddmsoft.io import save_matrix_set
-from ddmsoft.models import DDMData, VideoMetadata
+from ddmsoft.models import DDMData, FitRange, VideoMetadata
+from ddmsoft.plotting import (
+    AmplitudeNoiseDiffusionPlotController,
+    CorrelationPlotController,
+    FitParameterPlotController,
+    MatrixPlotController,
+)
+
+from .fixtures import generate_model_data, write_legacy_matrix
 
 
 def test_main_window_maps_legacy_workflow_controls(qapp):
@@ -245,6 +254,70 @@ def test_processing_cancel_button_requests_cooperative_cancellation(qapp, tmp_pa
     assert window.status_label.text() == "Processing cancelled"
     assert window.progress_bar.value() < 100
     assert window.cancel_button.isEnabled() is False
+    window.close()
+
+
+def test_fit_workflow_uses_worker_range_and_keeps_modeless_plots_independent(qapp, tmp_path):
+    root = _metadata_only_directory(tmp_path, "sample")
+    write_legacy_matrix(root, "sample", generate_model_data("stretch"))
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    window.model_selector.setCurrentIndex(window.model_selector.findData("stretch"))
+    window.q_min_slider.setValue(1)
+    window.time_min_slider.setValue(2)
+
+    window.start_fitting()
+    _wait_for(qapp, lambda: not window._job_active)
+
+    fit = window.selected_fit
+    assert fit is not None
+    assert window.selected_fit_range is not None
+    assert window.selected_fit_range.q_min == 1
+    assert window.selected_fit_range.q_max == 3
+    assert window.selected_fit_range.time_min == 2
+    assert window.selected_fit_range.time_max == 6
+    assert np.array_equal(fit.q_values, window.selected_matrix.q_values[1:4])
+    assert fit.correlation.shape == (5, 3)
+
+    matrix_plot = window.plot_selected_matrix()
+    correlation_plot = window.plot_selected_correlation()
+    parameter_plot = window.plot_fitted_parameters()
+    amplitude_plot = window.plot_amplitude_noise_diffusion()
+    assert isinstance(matrix_plot, MatrixPlotController)
+    assert isinstance(correlation_plot, CorrelationPlotController)
+    assert isinstance(parameter_plot, FitParameterPlotController)
+    assert isinstance(amplitude_plot, AmplitudeNoiseDiffusionPlotController)
+    assert matrix_plot.fit_image is not None
+    assert correlation_plot.fit_range == window.selected_fit_range
+    assert len(parameter_plot.parameter_lines) == 4
+    assert len(amplitude_plot.lines) == 3
+
+    old_value = window.q_min_slider.value()
+    window.q_min_slider.setValue(0)
+    assert window.q_min_slider.value() != old_value
+    assert window.q_min_slider.isEnabled()
+    window.close()
+
+
+def test_fit_result_for_previous_matrix_is_ignored(qapp, tmp_path):
+    root = _legacy_directory(tmp_path, "a", q_count=3, time_count=4)
+    _write_dataset(root, "b", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    first_path = window.matrix_selector.itemData(1)
+    first_data = window._matrices[first_path]
+    first_request = default_fit_request("stretch", FitRange(0, 2, 0, 3))
+    first_fit = fit_ddm(first_data, first_request)
+    window.matrix_selector.setCurrentIndex(2)
+
+    window._fit_worker_result(FitComputationResult(first_path, first_request, first_fit))
+
+    assert window.selected_matrix_path != first_path
+    assert window.selected_fit is None
     window.close()
 
 
