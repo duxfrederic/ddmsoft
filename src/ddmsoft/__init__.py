@@ -5,6 +5,7 @@ from .io import load_directory, load_matrices, parse_metadata_file, save_matrix_
 from .engine import compute_ddm, compute_video_ddm
 from .fitting import MODEL_REGISTRY, fit_ddm
 from .combining import average_ddm, average_groups, merge_ddm
+from .contin import CONTINResult, run_contin
 
 __version__ = "0.1.0"
 
@@ -17,6 +18,8 @@ __all__ = [
     "average_ddm",
     "average_groups",
     "merge_ddm",
+    "CONTINResult",
+    "run_contin",
     "FitRange",
     "FitRequest",
     "FitResult",
