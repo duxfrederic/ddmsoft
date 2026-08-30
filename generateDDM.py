@@ -7,8 +7,7 @@ A small GUI program to interface a custom DDM setup.
 """
 
 import  numpy              as      np
-from    scipy.signal       import  tukey
-from    skvideo.io         import  vread, vreader, FFmpegReader
+from    scipy.signal.windows import tukey
 from    os.path            import  exists, basename, dirname, join
 from    os                 import  makedirs, remove
 import  cv2
@@ -17,6 +16,32 @@ from    multiprocessing    import  cpu_count
 from    subprocess         import  call
 
 from    utilities          import  ddm_matrices, RadialAverager
+from    ddmsoft.engine     import  read_video_frames
+
+
+def vread(filename, as_grey=False):
+    """Legacy-shaped replacement for the old eager video reader."""
+    frames = list(read_video_frames(filename))
+    if not frames:
+        return np.empty((0, 0, 0, 1))
+    return np.asarray(frames, dtype=np.float32)[..., np.newaxis]
+
+
+def vreader(filename, as_grey=False):
+    """Legacy-shaped replacement for the old streaming video reader."""
+    for frame in read_video_frames(filename):
+        yield frame[np.newaxis, ..., np.newaxis]
+
+
+class FFmpegReader:
+    """Small compatibility wrapper for the old frame-count query."""
+
+    def __init__(self, filename):
+        self.filename = filename
+
+    def getShape(self):
+        count = sum(1 for _ in read_video_frames(self.filename))
+        return (count,)
 
 def tukey_twoD(width, alpha):
     """2D tukey lowpass window with a circular support
@@ -287,11 +312,10 @@ def readVideoFrame(filename, framenumber):
     """
     if not exists(filename):
         raise IOError
-    cap = cv2.VideoCapture(filename)
-    cap.set(1, framenumber) # 2 is the CV_CAP_PROP_POS_FRAMES flag
-    res, frame = cap.read()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    return gray
+    for index, frame in enumerate(read_video_frames(filename)):
+        if index == framenumber:
+            return frame
+    raise IOError(f"frame {framenumber} does not exist in {filename}")
 
 def concatenateVideos(pathsToVideos, pathToConcatenated, as_grey=True):
     workingdir = dirname(pathsToVideos[0])
@@ -304,8 +328,6 @@ def concatenateVideos(pathsToVideos, pathToConcatenated, as_grey=True):
     remove(listofvidsforffmpeg)
     
         
-
-
 
 
 

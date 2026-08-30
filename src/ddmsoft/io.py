@@ -309,6 +309,34 @@ def save_matrix_csv(
     return paths
 
 
+def save_matrix_set(
+    output_prefix: str | Path, data: DDMData | Sequence[np.ndarray]
+) -> tuple[Path, Path, Path]:
+    """Atomically write a legacy three-file NumPy matrix set.
+
+    Temporary files are created beside the destinations and are only replaced
+    after all three arrays have been serialized successfully.  This prevents a
+    cancelled or failed computation from looking like a complete dataset.
+    """
+    ddm_data = _as_ddm_data(data)
+    prefix = _prefix(output_prefix, LEGACY_SUFFIXES)
+    paths = tuple(prefix.with_name(prefix.name + suffix) for suffix in LEGACY_SUFFIXES)
+    temporary_paths: list[Path] = []
+    try:
+        for index, array in enumerate((ddm_data.matrix, ddm_data.lag_times, ddm_data.q_values)):
+            temporary = paths[index].with_name(f".{paths[index].name}.tmp")
+            temporary_paths.append(temporary)
+            with temporary.open("wb") as temporary_file:
+                np.save(temporary_file, array, allow_pickle=False)
+        for temporary, destination in zip(temporary_paths, paths):
+            temporary.replace(destination)
+    except (OSError, ValueError, TypeError):
+        for temporary in temporary_paths:
+            temporary.unlink(missing_ok=True)
+        raise
+    return paths
+
+
 def save_autocorrelation_csv(
     output_prefix: str | Path,
     data: DDMData | Sequence[np.ndarray],
@@ -429,4 +457,5 @@ __all__ = [
     "save_fit_text",
     "save_matrix",
     "save_matrix_csv",
+    "save_matrix_set",
 ]
