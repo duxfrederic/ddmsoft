@@ -8,7 +8,8 @@ A small GUI program to interface a custom DDM setup.
 import        re
 import        numpy           as      np
 from          os.path         import  exists, join, basename, isfile, normpath, \
-                                      split, dirname
+                                       split, dirname, splitext
+from          os              import  sep
 from          glob            import  glob
 from          shutil          import  move
 
@@ -37,7 +38,7 @@ def effectiveTemperature(thermistance_measured):
 
 def extractCrudef(ddm, A=None, B=None):
     if (A is None) and (B is None):
-        aplusb = (ddm[-1,:]+ddm[-2,:]+ddm[-3,:])/3
+        aplusb = np.mean(ddm[-min(3, len(ddm)):], axis=0)
         B      = ddm[0, :]
         A      = aplusb-B
     f = 1 - (ddm-B)/(A[np.newaxis,:])
@@ -47,7 +48,7 @@ def loadDirectory(path):
     params = {}
     if exists(path):
         files    = glob(join(path, '*.txt'))
-        videos   = glob(join(path, '*.avi'))
+        videos   = glob(join(path, '*.avi')) + glob(join(path, '*.AVI'))
         files.sort()
         videos.sort()
         if len(videos)==0:
@@ -63,9 +64,9 @@ def loadDirectory(path):
         elif len(files) == len(videos) and len(videos)>1:
             print(f'one config file per video found in directory {path}')
             for file, vid in zip(files, videos):
-                if not file.replace('.txt','')==vid.replace('.avi',''):
+                if splitext(file)[0] != splitext(vid)[0]:
                     # case wrong config file
-                    return 0
+                    return {}
                 params[vid] = readParams(file)
             return params
         elif len(files) == 1:
@@ -75,6 +76,7 @@ def loadDirectory(path):
             return params
         else:
             print(len(files), len(videos))
+            return {}
     else:
         # case directory does not exist
         return {}
@@ -107,41 +109,38 @@ def readParams(path, existingparams=None):
         convertedkey = normpath(convertedkey)
         if convertedkey in existingparams:
             return existingparams[convertedkey]
-    
+
     generic_name = 'acquisition_parameters.txt'
     if isfile(path):
-        
-        # go back to the main directory:
-        pathdir, taildir       = split(path)
-        pathdirdir, taildirdir = split(pathdir)
-        if ddm_matrices in taildir or ddm_matrices in taildirdir:
-            path = normpath(path.replace(ddm_matrices, ''))
-        # and proceed
-        path = path.replace('.avi', '.txt')
+        path = normpath(path)
+        pathdir = dirname(path)
+        if ddm_matrices in normpath(path).split(sep):
+            pathdir = dirname(pathdir)
+        filename = basename(path)
         for musthave in musthaves:
-            path = path.replace(musthave, '.txt')
-        if not exists(path):
-            path = path.replace(basename(path), generic_name)
+            filename = filename.replace(musthave, '')
+        filename = filename.replace('.avi', '').replace('.AVI', '')
+        candidates = [join(pathdir, filename + '.txt'), join(pathdir, generic_name)]
     else:
-        path = join(path, generic_name)
-        
-    if not exists(path):
-        path += '.txt' # sometimes windows hides the extension of the file
-    if not exists(path):
-        try:
-            path = glob(join(dirname(path), '*.txt'))[0]
-        except:
-            print("no appropriate config file found")
-            pass # then we're screwed, allow the traceback from below to unroll
-        
-        
-    with open(path, 'r') as f:
+        pathdir = path
+        candidates = [join(pathdir, generic_name)]
+
+    candidates.extend(sorted(glob(join(pathdir, '*.txt'))))
+    config_path = next((candidate for candidate in candidates if exists(candidate)), None)
+    if config_path is None:
+        raise FileNotFoundError(f"No acquisition parameter file found near {path}")
+
+    with open(config_path, 'r', encoding='utf-8') as f:
         text   = f.readlines()
         params = {}
         for element in text:
-            key, value  = element.split(':')
+            element = element.strip()
+            if not element or element.startswith('#'):
+                continue
+            if ':' not in element:
+                continue
+            key, value  = element.split(':', 1)
             key         = key.strip()
-            value       = value.replace('\n', '')
             value       = value.strip()
             params[key] = value
     return params
@@ -179,7 +178,7 @@ def saveFitTextFile(path, qs, A, B, params, paramnames, viscosity=None,\
         path += '.txt'
     delimiter = '\t'
     header = ["q [m^-1]", "A", "B"] + paramnames
-    if not RHeff is  None:
+    if RHeff is not None:
         header += ["R_H eff (nm)"]
     header = delimiter.join(header) + "\n"
     with open(path, 'w') as savefile:
@@ -188,7 +187,7 @@ def saveFitTextFile(path, qs, A, B, params, paramnames, viscosity=None,\
             qab       = [qs[i], A[i], B[i]]
             paramline = [paramset[i] for paramset in params] 
             towrite   = qab + paramline
-            if not RHeff is None:
+            if RHeff is not None:
                 towrite += [RHeff[i]]
             towrite   = [f"{p:.3e}" for p in towrite]
             savefile.write(delimiter.join(towrite)+"\n")
@@ -226,14 +225,15 @@ def saveSingleCONTINfit(path, sol, video, q):
             for tau, exp, fit in zip(sol.tau, sol.ddmdata, intensity):
                 f.write(f"{tau:.03e}\t{exp:.03e}\t{fit:.03e}\n")
 
-def saveCONTINfit(path, CONTINsolutions, CONTINwindow, video, q):
-    if bool(CONTINwindow.Element('continsaveall').Get()):
-        for video in CONTINsolutions:
-            for q in CONTINsolutions[video]:
-                path_mod = path + f"_{basename(video.replace('.npy', ''))}_q={q:.03e}.csv"
-                sol = CONTINsolutions[video][q]
-                saveSingleCONTINfit(path_mod, sol, video, q)
-    else:       
+def saveCONTINfit(path, CONTINsolutions, video, q, save_all=False):
+    """Save one CONTIN solution, or all stored solutions, without GUI coupling."""
+    if save_all:
+        for solution_video in CONTINsolutions:
+            for solution_q in CONTINsolutions[solution_video]:
+                path_mod = path + f"_{basename(solution_video.replace('.npy', ''))}_q={solution_q:.03e}.csv"
+                sol = CONTINsolutions[solution_video][solution_q]
+                saveSingleCONTINfit(path_mod, sol, solution_video, solution_q)
+    else:
         sol = CONTINsolutions[video][q]
         saveSingleCONTINfit(path, sol, video, q)
             
@@ -258,7 +258,11 @@ class RadialAverager(object):
         self.radbins     = np.arange(max(shape)//2+1)/float(max(shape))
         if N > 1:
             # matrix of arguments
-            self.args    = np.arctan(np.fft.fftfreq(shape[1])[None,:] / np.fft.fftfreq(shape[0])[:,None]) + np.pi/2 
+            with np.errstate(divide='ignore', invalid='ignore'):
+                self.args = np.arctan(
+                    np.fft.fftfreq(shape[1])[None, :] /
+                    np.fft.fftfreq(shape[0])[:, None]
+                ) + np.pi/2
             # angular division of the wheel:
             self.argbins = np.arange(-0.5, N) / N * (np.pi) 
             self.args[self.args>(N-0.5)/N*np.pi] -= np.pi
@@ -281,11 +285,11 @@ class RadialAverager(object):
             avgs = []
             for who, hd in zip(self.whos, self.hd):
                 hw = np.histogram(self.dists[who], self.radbins, weights=im[who])[0]
-                avgs.append(hw/hd)
+                avgs.append(np.divide(hw, hd, out=np.zeros_like(hw, dtype=float), where=hd > 0))
             return avgs
         else:
             hw = np.histogram(self.dists, self.radbins, weights=im)[0]
-            return [hw/self.hd[0]]
+            return [np.divide(hw, self.hd[0], out=np.zeros_like(hw, dtype=float), where=self.hd[0] > 0)]
         
 class RadialAverager_test(object):
     def __init__(self, shape, N=1, centred_theta=True):

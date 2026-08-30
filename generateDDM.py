@@ -8,15 +8,65 @@ A small GUI program to interface a custom DDM setup.
 
 import  numpy                as      np
 from    scipy.signal.windows import  tukey
-from    skvideo.io           import  vread, vreader, FFmpegReader
-from    os.path              import  exists, basename, dirname, join
+from    os.path              import  exists, basename, dirname, join, splitext
 from    os                   import  makedirs, remove
 import  cv2
 from    joblib               import  Parallel, delayed
 from    multiprocessing      import  cpu_count
-from    subprocess           import  call
 
 from    utilities            import  ddm_matrices, RadialAverager
+
+
+def _as_gray(frame):
+    """Return a video frame as a two-dimensional float-compatible array."""
+    frame = np.asarray(frame)
+    if frame.ndim == 3:
+        if frame.shape[-1] == 1:
+            frame = frame[..., 0]
+        else:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if frame.ndim != 2:
+        raise ValueError(f"Expected a grayscale or colour image, got shape {frame.shape}")
+    return frame
+
+
+def _video_frame_count(filename):
+    capture = cv2.VideoCapture(filename)
+    if not capture.isOpened():
+        capture.release()
+        raise IOError(f"Could not open video: {filename}")
+    count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    capture.release()
+    if count <= 0:
+        raise ValueError(f"Could not determine the frame count for: {filename}")
+    return count
+
+
+def _video_frames(filename):
+    capture = cv2.VideoCapture(filename)
+    if not capture.isOpened():
+        capture.release()
+        raise IOError(f"Could not open video: {filename}")
+    try:
+        while True:
+            success, frame = capture.read()
+            if not success:
+                break
+            yield _as_gray(frame)
+    finally:
+        capture.release()
+
+
+def partition_frame_counts(nframes, npartitions):
+    """Split a frame count into non-empty partitions without dropping frames."""
+    nframes = int(nframes)
+    npartitions = int(npartitions)
+    if nframes < 1:
+        raise ValueError("A video must contain at least one frame")
+    if not 1 <= npartitions <= nframes:
+        raise ValueError("The number of partitions must be between 1 and the frame count")
+    base, remainder = divmod(nframes, npartitions)
+    return [base + (index < remainder) for index in range(npartitions)]
 
 def tukey_twoD(width, alpha):
     """2D tukey lowpass window with a circular support
@@ -51,26 +101,26 @@ class timeDependantDDM():
         self.Nperpart    = 1
     
     def loadVideo(self, path):
-        vid_reader    = FFmpegReader(path) 
-        Nframes       = vid_reader.getShape()[0]
-        self.Nperpart = Nframes // self.Npartitions
-        del vid_reader
-        vid_reader    = vreader(path, as_grey=True)
-        for i in range(self.Npartitions):
-            stack     = FFTStack(self.freq, self.pixelsize, self.maxCouples, 
-                                 self.ptPerDecade, t0=i, alone=False)
-            stack.loadVideoFromGenerator(vid_reader, path, self.Nperpart)
-            
-            self.partitions[i] = stack
-        del vid_reader
+        Nframes = _video_frame_count(path)
+        counts = partition_frame_counts(Nframes, self.Npartitions)
+        self.partitions.clear()
+        frame_offset = 0
+        frames = _video_frames(path)
+        for count in counts:
+            stack = FFTStack(self.freq, self.pixelsize, self.maxCouples,
+                             self.ptPerDecade, t0=frame_offset, alone=False)
+            stack.loadVideoFromGenerator(frames, path, count)
+            self.partitions[frame_offset] = stack
+            frame_offset += count
+        self.Nperpart = counts[0]
         self.loaded = True
         # loaded the videos, useless to attempt doing it in parallel though.
         # (io speed limited, serial nature of the generator)
         
         
     def fftAllStacks(self):
-        for start in self.partitions:
-            self.partitions[start].fftVideo()
+        for stack in self.partitions.values():
+            stack.fftVideo()
         self.fftdone = True
         # also not doing that in parallel, as the fft routines are already
         # heavily optimized and will use 100% of the cpu
@@ -81,10 +131,13 @@ class timeDependantDDM():
     
     
     def ddmAllStacks(self):
-        listofDics =  Parallel(n_jobs=cpu_count()) ( delayed(self.__ddmOneStack) (i) for i in range(self.Npartitions) )
+        offsets = list(self.partitions)
+        listofDics = Parallel(n_jobs=cpu_count())(
+            delayed(self.__ddmOneStack)(offset) for offset in offsets
+        )
         del self.partitions
-        for i in range(self.Npartitions):
-            self.ddmmatrices[i*self.Nperpart] = listofDics[i]
+        for offset, matrix in zip(offsets, listofDics):
+            self.ddmmatrices[offset] = matrix
         self.completed = True
     
     def getStatus(self):
@@ -94,7 +147,8 @@ class timeDependantDDM():
 class FFTStack():
     
     def __init__(self, freq, pixelsize, maxCouples, ptPerDecade, Nangle=1, 
-                 t0=0, alone=True, debug=False, windowing=False):
+                 t0=0, alone=True, debug=False, windowing=False,
+                 progress_callback=None):
         self.freq        = freq
         self.pixelsize   = pixelsize
         self.maxCouples  = maxCouples
@@ -113,6 +167,7 @@ class FFTStack():
         self.averageFFT  = None
         self.debug       = debug
         self.windowing   = windowing
+        self.progress_callback = progress_callback
         
     def __len__(self):
         return self.Nbimages
@@ -124,21 +179,38 @@ class FFTStack():
         return self.data[t,:,:]
     
     def loadVideoFromGenerator(self, vreader_generator, filename, nframes):
-        self.Nbimages = nframes
+        self.Nbimages = int(nframes)
+        if self.Nbimages < 1:
+            raise ValueError("A stack must contain at least one frame")
         self.filename = filename
-        firstFrame = vreader_generator.send(None)[0,:,:,0]
-        
+        frames = iter(vreader_generator)
+        try:
+            firstFrame = _as_gray(next(frames))
+        except StopIteration as error:
+            raise ValueError("The video ended before the requested frames were read") from error
         x, y       = firstFrame.shape[:2]
         self.shape = (x,y)
         self.data  = np.zeros((nframes, x, y), dtype=np.complex64)
         self.data[0, :, :] = firstFrame
         for i in range(1, nframes):
-            self.data[i, :, :] = vreader_generator.send(None)[0,:,:,0]
+            try:
+                frame = _as_gray(next(frames))
+            except StopIteration as error:
+                raise ValueError("The video ended before the requested frames were read") from error
+            if frame.shape != self.shape:
+                raise ValueError("All video frames must have the same dimensions")
+            self.data[i, :, :] = frame
     
     def loadVideo(self, filename, t0=0):
         self.filename    = filename
         self.t0          = t0
-        self.data        = vread(filename, as_grey=1)[:,:,:,0].astype(np.complex64)
+        frames = list(_video_frames(filename))
+        if not frames:
+            raise ValueError(f"No frames found in video: {filename}")
+        shape = frames[0].shape
+        if any(frame.shape != shape for frame in frames):
+            raise ValueError("All video frames must have the same dimensions")
+        self.data        = np.asarray(frames, dtype=np.complex64)
         self.Nbimages    = self.data.shape[0]
         # get the images shape while checking that the last image does exist
         self.shape       = self.data.shape[1:]
@@ -152,7 +224,13 @@ class FFTStack():
         
     def fftVideo(self):
         if self.windowing:
-            self.window = tukey_twoD(self.shape[0], self.windowing)
+            if self.shape[0] == self.shape[1]:
+                self.window = tukey_twoD(self.shape[0], self.windowing)
+            else:
+                self.window = np.outer(
+                    tukey(self.shape[0], self.windowing),
+                    tukey(self.shape[1], self.windowing),
+                )
         for t in range(self.Nbimages):
             #self.data[t,:,:] = dctn(self.data[t,:,:])
             if self.windowing:
@@ -160,6 +238,7 @@ class FFTStack():
             else:
                 self.data[t,:,:] = np.fft.fft2(self.data[t,:,:])
             self.progress   += 1 
+            self._report_progress()
         self.fftdone = True
         
     def getAverageFFT(self):
@@ -187,16 +266,18 @@ class FFTStack():
  were allowed. (More statistics can be extracted from the stack by setting\
  a higher maximal number of couples. (slower)")
         ra   = RadialAverager(self.shape, self.Nangle)
-        DDMs= [np.zeros((len(idts), self.shape[0]//2)) for _ in range(self.Nangle)]
+        nq = min(self.shape) // 2
+        DDMs= [np.zeros((len(idts), nq)) for _ in range(self.Nangle)]
 
         for i, idt in enumerate(idts):
             curves = ra(self.timeAverage(idt))
             for j, curve in enumerate(curves):
-                DDMs[j][i] = curve[:self.shape[0]//2]
+                DDMs[j][i] = curve[:nq]
             if self.maxCouples > 0 :
                 self.progress += self.maxCouples
             else:
                 self.progress += self.Nbimages
+            self._report_progress()
         return DDMs
         
     def timeAverage(self, dt):
@@ -204,6 +285,8 @@ class FFTStack():
         Separation within couple is dt."""
         #Spread initial times over the available range
         initialTimes  = np.arange(0, len(self)-dt, self.increment)
+        if initialTimes.size == 0:
+            raise ValueError(f"Lag time {dt} is not available for a {len(self)} frame stack")
         inverseleng   = 1./ initialTimes.size
         #perform the time average
         avgFFT        = np.zeros(self.shape)
@@ -225,7 +308,7 @@ class FFTStack():
         # move the values to the center of each bin (see utilities.RadialAverager)
         qs         = qs + 0.5 * (qs[1]-qs[0])
         
-        expname    = self.filename.replace('.avi', '')
+        expname    = splitext(self.filename)[0]
         expdir     = dirname(expname)
         savedir    = join(expdir, ddm_matrices)
         expname    = basename(expname)
@@ -233,7 +316,7 @@ class FFTStack():
         if self.alone:
             extra = ''
         else:
-            extra = '__i='+str(self.t0*self.Nbimages)+'__'
+            extra = '__i='+str(self.t0)+'__'
 
         if len(DDMs)==1:
             np.save(join( savedir, expname + extra + '_QS'), qs)
@@ -247,8 +330,14 @@ class FFTStack():
                 np.save(join( savedir, expname + extra + angle_param + '_deltaTs'), dts)
                 np.save(join( savedir, expname + extra + angle_param + '_DDM_matrix'), DDMs[i])
                 
+        result = (DDMs, dts, qs)
         del DDMs, qs, idts, dts, self.data
         self.completed = True
+        return result
+
+    def _report_progress(self):
+        if self.progress_callback is not None:
+            self.progress_callback(self.progress, self.getTotalNumberOfOperations())
         
         
     def getProgress(self):
@@ -272,12 +361,19 @@ def logSpaced(L, pointsPerDecade=20):
     Generate an array of log spaced integers smaller than L.
     taken from https://github.com/MathieuLeocmach/colloids/blob/master/python/colloids/ddm.py
     """
-    nbdecades = np.log10(L)
+    L = int(L)
+    pointsPerDecade = int(pointsPerDecade)
+    if L < 2:
+        raise ValueError("At least two frames are required to calculate lag times")
+    if pointsPerDecade < 1:
+        raise ValueError("pointsPerDecade must be positive")
+    nbdecades = np.log10(L - 1)
+    npoints = max(2, int(np.ceil(np.log10(L) * pointsPerDecade)))
     return np.unique(np.logspace(
-        start=0, stop=nbdecades, 
-        num= int(nbdecades) * pointsPerDecade, 
-        base=10, endpoint=False
-        ).astype(int))
+        start=0, stop=nbdecades,
+        num=npoints,
+        base=10, endpoint=True
+    ).astype(int))
     
     
 def readVideoFrame(filename, framenumber):
@@ -290,23 +386,59 @@ def readVideoFrame(filename, framenumber):
     cap = cv2.VideoCapture(filename)
     cap.set(1, framenumber) # 2 is the CV_CAP_PROP_POS_FRAMES flag
     res, frame = cap.read()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cap.release()
+    if not res:
+        raise IOError(f"Could not read frame {framenumber} from {filename}")
+    gray = _as_gray(frame)
     return gray
 
 def concatenateVideos(pathsToVideos, pathToConcatenated, as_grey=True):
-    workingdir = dirname(pathsToVideos[0])
-    listofvidsforffmpeg = join(workingdir, "my_list_of_videos_to_stack_3215.txt")
-    with open(listofvidsforffmpeg, 'w') as f:
+    """Concatenate videos with OpenCV, without requiring an ffmpeg binary."""
+    if not pathsToVideos:
+        raise ValueError("At least one video is required")
+    first = cv2.VideoCapture(pathsToVideos[0])
+    if not first.isOpened():
+        first.release()
+        raise IOError(f"Could not open video: {pathsToVideos[0]}")
+    width = int(first.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(first.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = first.get(cv2.CAP_PROP_FPS)
+    first.release()
+    if width < 1 or height < 1:
+        raise ValueError("Could not determine the video dimensions")
+    fps = fps if fps > 0 else 30.0
+    writer = cv2.VideoWriter(
+        pathToConcatenated,
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        writer.release()
+        raise IOError(f"Could not create video: {pathToConcatenated}")
+    try:
         for path in pathsToVideos:
-            f.writelines(f"file {path}\n")
-    call(['ffmpeg', '-safe', '0', '-f', 'concat', '-i', listofvidsforffmpeg, \
-          '-c', 'copy', pathToConcatenated ])
-    remove(listofvidsforffmpeg)
+            capture = cv2.VideoCapture(path)
+            if not capture.isOpened():
+                raise IOError(f"Could not open video: {path}")
+            try:
+                while True:
+                    success, frame = capture.read()
+                    if not success:
+                        break
+                    if frame.shape[1::-1] != (width, height):
+                        raise ValueError("All videos must have the same dimensions")
+                    writer.write(frame)
+            finally:
+                capture.release()
+    except Exception:
+        writer.release()
+        if exists(pathToConcatenated):
+            remove(pathToConcatenated)
+        raise
+    writer.release()
     
         
-
-
-
 
 
 

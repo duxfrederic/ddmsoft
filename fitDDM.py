@@ -18,45 +18,67 @@ mycolormap = 'plasma'
 
 
 def mergeDDM(computedData, mode='merge', title=''):
-    params       = {}
-    keys  = list(computedData.keys())
-    keys  = [key for key in keys if (not "Merged" in key)]
-    framerateold = -10
-    for vid in keys:
-        param        = {}
-        framerate    = 1/(computedData[vid][1][1]-computedData[vid][1][0])
-        param['framerate'] = framerate
-        print(framerate)
-        if framerate == framerateold and mode == 'merge':
-            print("Videos to be merged with the same framerate: error?")
-        framerateold = framerate
-        params[vid]  = param
-    keys.sort(key=lambda vid: -float(params[vid]['framerate']))
-    first = keys[0]
-    ddm, dts, qs = computedData[first]
-    framerateold = params[first]['framerate']
+    keys = [key for key in computedData if "Merged" not in str(key)]
+    if not keys:
+        raise ValueError("No matrices were supplied")
+
+    def frame_rate(key):
+        dts = np.asarray(computedData[key][1])
+        if dts.size < 2 or dts[1] <= dts[0]:
+            raise ValueError(f"Invalid time grid for matrix {key}")
+        return 1 / (dts[1] - dts[0])
+
+    for key in keys:
+        ddm, dts, qs = computedData[key]
+        if np.asarray(ddm).ndim != 2 or len(dts) != len(ddm) or len(qs) != ddm.shape[1]:
+            raise ValueError(f"Incompatible DDM matrix: {key}")
+
     if mode == 'average':
-        i = 1
-        while i < len(keys):
-            N = 1
-            while i < len(keys) and params[keys[i]]['framerate'] == framerateold :
-                if not "Averaged(" in keys[i]:
-                    ddm += computedData[keys[i]][0] 
-                    N   += 1
-                    framerateold = params[keys[i]]['framerate']
-                i   += 1
-            ddm = ddm / N
-            tosave = [ddm, dts, qs]
-            for musthave, arr in zip(musthaves, tosave):
-                np.save(join(dirname(vid),f"Averaged({framerateold})_{title}"+musthave), arr) 
-            i += 1
-    else:
-        for i in range(1,len(keys)):
-            ddmnew, dtsnew, qsnew = computedData[keys[i]]
-            ddm, dts = merge(ddm, ddmnew, dts, dtsnew)
-        tosave = [ddm, dts, qs]
-        for musthave, arr in zip(musthaves, tosave):
-            np.save(join(dirname(vid),f"Merged_{title}"+musthave), arr) 
+        groups = []
+        for key in keys:
+            rate = frame_rate(key)
+            group = next((group for group in groups if np.isclose(group[0], rate)), None)
+            if group is None:
+                group = [rate, []]
+                groups.append(group)
+            group[1].append(key)
+
+        output_paths = []
+        for rate, group_keys in groups:
+            first_ddm, dts, qs = computedData[group_keys[0]]
+            if any(
+                not np.array_equal(dts, computedData[key][1]) or
+                not np.array_equal(qs, computedData[key][2]) or
+                np.shape(first_ddm) != np.shape(computedData[key][0])
+                for key in group_keys[1:]
+            ):
+                raise ValueError("Matrices being averaged must have matching grids")
+            ddm = np.mean(
+                [np.asarray(computedData[key][0], dtype=float) for key in group_keys],
+                axis=0,
+            )
+            output_paths.append(_save_merged(
+                dirname(group_keys[0]), f"Averaged({rate:g})_{title}", ddm, dts, qs
+            ))
+        return output_paths
+
+    keys.sort(key=frame_rate, reverse=True)
+    ddm, dts, qs = (np.array(value, copy=True) for value in computedData[keys[0]])
+    for key in keys[1:]:
+        ddmnew, dtsnew, qsnew = computedData[key]
+        if not np.array_equal(qs, qsnew):
+            raise ValueError("Matrices being merged must use the same q grid")
+        ddm, dts = merge(ddm, ddmnew, dts, dtsnew)
+    return _save_merged(dirname(keys[0]), f"Merged_{title}", ddm, dts, qs)
+
+
+def _save_merged(directory, prefix, ddm, dts, qs):
+    paths = []
+    for musthave, arr in zip(musthaves, (ddm, dts, qs)):
+        path = join(directory, prefix + musthave)
+        np.save(path, arr)
+        paths.append(path)
+    return paths
 
 
 def merge(ddmf, ddms, dtsf, dtss):
@@ -64,28 +86,46 @@ def merge(ddmf, ddms, dtsf, dtss):
         Taken from http://perso.ens-lyon.fr/thomas.gibaud/ddm
         ( https://aapt.scitation.org/doi/10.1119/1.4939516 )
     """ 
-    # Find the closest time at the fast freq to the smallest time at the small freq
-    boundary     = np.argmin(np.abs(dtsf - dtss[0]))
-    # Rescale the value at the slow freq according to the value at t=boundary for the fast freq
-    ddms        *= ddmf[boundary] / ddms[0]
-    # find the first third of their overlap
-    overlap0     = (len(ddmf)-1 - boundary)
-    overlap1     = np.argmin(np.abs(dtss - dtsf[boundary+overlap0]))
-    #interpolate on this first third the DDM at 4Hz on the times at 400Hz
-    interpolated = np.transpose([
-        np.interp(
-            dtsf[boundary:boundary+overlap0],
-            dtss[:overlap1], 
-            v)
-        for v in ddms[:overlap1].T])
-    #do a smooth transition on this first third
-    x          = ((dtsf[boundary:boundary+overlap0]-dtsf[boundary])/(dtsf[boundary+overlap0]-dtsf[boundary]))[:,None]
-    transition = (1-x) * ddmf[boundary:boundary+overlap0] + x * interpolated
-    # Merge f Hz, transition to s Hz
-    dts = np.concatenate([dtsf[:boundary+overlap0], dtss[overlap1:]])
-    ddm = np.concatenate([ddmf[:boundary], transition, ddms[overlap1:]], axis=0)
-    #"""
-    return ddm, dts     
+    ddmf = np.asarray(ddmf, dtype=float)
+    ddms = np.asarray(ddms, dtype=float)
+    dtsf = np.asarray(dtsf, dtype=float)
+    dtss = np.asarray(dtss, dtype=float)
+    if ddmf.ndim != 2 or ddms.ndim != 2:
+        raise ValueError("DDM matrices must be two-dimensional")
+    if ddmf.shape[1] != ddms.shape[1]:
+        raise ValueError("DDM matrices must have the same number of q values")
+    if len(dtsf) != len(ddmf) or len(dtss) != len(ddms):
+        raise ValueError("Each DDM matrix must match its time grid")
+    if len(dtsf) < 2 or len(dtss) < 2 or np.any(np.diff(dtsf) <= 0) or np.any(np.diff(dtss) <= 0):
+        raise ValueError("Time grids must be strictly increasing")
+    if dtss[0] > dtsf[-1] or dtsf[0] > dtss[-1]:
+        raise ValueError("The DDM time grids do not overlap")
+
+    boundary = int(np.argmin(np.abs(dtsf - dtss[0])))
+    overlap_end = min(dtsf[-1], dtss[-1])
+    fast_end = int(np.searchsorted(dtsf, overlap_end, side='right') - 1)
+    if fast_end < boundary:
+        raise ValueError("The DDM time grids do not overlap")
+    overlap_times = dtsf[boundary:fast_end + 1]
+
+    if np.any(ddms[0] == 0):
+        raise ValueError("Cannot merge a matrix with zero initial amplitude")
+    scale = ddmf[boundary] / ddms[0]
+    slow_scaled = ddms * scale
+    interpolated = np.column_stack([
+        np.interp(overlap_times, dtss, slow_scaled[:, column])
+        for column in range(ddms.shape[1])
+    ])
+    if len(overlap_times) == 1:
+        transition = interpolated
+    else:
+        blend = np.linspace(0, 1, len(overlap_times))[:, None]
+        transition = (1 - blend) * ddmf[boundary:fast_end + 1] + blend * interpolated
+
+    slow_tail = np.searchsorted(dtss, overlap_times[-1], side='right')
+    dts = np.concatenate([dtsf[:boundary], overlap_times, dtss[slow_tail:]])
+    ddm = np.concatenate([ddmf[:boundary], transition, slow_scaled[slow_tail:]], axis=0)
+    return ddm, dts
 
 
 
@@ -196,7 +236,9 @@ def ddm_penalty_dbl_exponential(params, ddm, QS, DTS, model, fixed, ini):
     return base+reg
 
 def est_A_B(ddm, a='', b=''):
-    aplusb      = (ddm[-1,:]+ddm[-2,:]+ddm[-3,:] ) / 3
+    if len(ddm) < 1:
+        raise ValueError("A DDM matrix must contain at least one time point")
+    aplusb      = np.mean(ddm[-min(3, len(ddm)):], axis=0)
     if b == '':
         b       = ddm[0, :]
     else:
@@ -213,18 +255,22 @@ def fitOneDDMmatrix(ddm_dts_qs, model, ini, fixed, qmin=0,
         returns A_fit, B_fit, modelparams_fit, f_analytical, opt_object
     """
     ddm, dts, qs   = ddm_dts_qs
-    ddmopt         = ddm[dtmin:dtmax:,qmin:qmax]
+    ini            = list(ini)
+    fixed          = list(fixed)
+    ddmopt         = ddm[dtmin:dtmax, qmin:qmax]
     
     dtsopt         = dts[dtmin:dtmax]
     qsopt          = qs[qmin:qmax]
-    QSopt, DTSopt  = np.meshgrid(qsopt, dts)
+    if ddmopt.size == 0 or len(qsopt) == 0 or len(dtsopt) == 0:
+        raise ValueError("The selected q and time ranges must contain data")
+    QSopt, DTSopt  = np.meshgrid(qsopt, dtsopt)
 
     a, b = ini[-2:]
     if a == '':
         fixed[-2] = False
     if b == '':
         fixed[-1] = False
-    a, b = est_A_B(ddm, a, b)
+    a, b = est_A_B(ddmopt, a, b)
     # now rotate: a, b are to the front in the optimization. (whereas they
     # were put at the end in the front end)
     ini   = list(np.roll(ini, 2))
@@ -284,8 +330,10 @@ def fitOneDDMmatrix(ddm_dts_qs, model, ini, fixed, qmin=0,
             opt.x = [e if f == False else i for e,f,i in zip(opt.x, fixed, ini_arg)]
             A.append(opt.x[0])
             B.append(opt.x[1])
-            [cumulants[i].append(opt.x[i+2]) for i in range(order)]
-            cumulants = [list(np.abs(cumulants[i])) if (i+1)%2 == 0 else cumulants[i] for i in range(order)]
+            for cumulant_index in range(order):
+                if (cumulant_index + 1) % 2 == 0:
+                    opt.x[cumulant_index + 2] = abs(opt.x[cumulant_index + 2])
+                cumulants[cumulant_index].append(opt.x[cumulant_index + 2])
             f = cumulant_exponential(opt.x, q, dts)
             fs.append(f)
         f = np.vstack(fs).T

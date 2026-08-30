@@ -11,7 +11,6 @@ import     matplotlib.pyplot         as      plt
 from       matplotlib.widgets        import  Slider
 from       datetime                  import  datetime
 from       utilities                 import  musthaves, extractCrudef
-plt.switch_backend('TkAgg')
 mycolormap = 'plasma'
 
 def getUniqueNum(comment, title):
