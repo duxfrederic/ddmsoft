@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
+from ddmsoft.engine import ComputationCancelled
 from ddmsoft.gui.main_window import DDMMainWindow
-from ddmsoft.models import VideoMetadata
+from ddmsoft.gui.workers import ComputationResult
+from ddmsoft.io import save_matrix_set
+from ddmsoft.models import DDMData, VideoMetadata
 
 
 def test_main_window_maps_legacy_workflow_controls(qapp):
@@ -159,6 +164,110 @@ def test_matrix_selection_clamps_ranges_and_disables_without_selection(qapp, tmp
     window.close()
 
 
+def test_processing_uses_worker_and_refreshes_catalog_without_blocking(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    heartbeats = []
+
+    def fake_job(request, report, cancel):
+        for index in range(8):
+            time.sleep(0.01)
+            report("synthetic", index + 1, 8)
+        output_directory = request.videos[0].path.parent / "ddm_matrices"
+        output_directory.mkdir()
+        paths = save_matrix_set(
+            output_directory / request.videos[0].path.stem,
+            DDMData(np.ones((2, 2)), np.array([0.01, 0.1]), np.array([1e6, 2e6])),
+        )
+        return ComputationResult(paths, tuple(video.path for video in request.videos), ())
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.run_video_computation", fake_job)
+    heartbeat = QTimer()
+    heartbeat.timeout.connect(lambda: heartbeats.append(time.monotonic()))
+    heartbeat.start(2)
+    window.start_processing()
+    assert window.cancel_button.isEnabled()
+    assert not window.load_button.isEnabled()
+    _wait_for(qapp, lambda: not window._job_active)
+    heartbeat.stop()
+
+    assert len(heartbeats) >= 3
+    assert window.progress_bar.value() == 100
+    assert "Completed 1 video" in window.status_label.text()
+    assert window.process_button.isEnabled()
+    assert window.selected_matrix_path == root / "ddm_matrices" / "sample_DDM_matrix.npy"
+    window.close()
+
+
+def test_processing_failure_preserves_traceback_in_details_view(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+
+    def fail_job(request, report, cancel):
+        raise RuntimeError("synthetic GUI failure")
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.run_video_computation", fail_job)
+    window.start_processing()
+    _wait_for(qapp, lambda: not window._job_active)
+
+    assert window.status_label.text() == "Processing failed: synthetic GUI failure"
+    assert not window.error_details.isHidden()
+    assert "RuntimeError: synthetic GUI failure" in window.error_details.toPlainText()
+    window.close()
+
+
+def test_processing_cancel_button_requests_cooperative_cancellation(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+
+    def cancellable_job(request, report, cancel):
+        for index in range(100):
+            if cancel():
+                raise ComputationCancelled("cancelled by GUI test")
+            time.sleep(0.005)
+            report("synthetic", index + 1, 100)
+        raise AssertionError("job was not cancelled")
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.run_video_computation", cancellable_job)
+    window.start_processing()
+    QTimer.singleShot(25, window.cancel_processing)
+    _wait_for(qapp, lambda: not window._job_active)
+
+    assert window.status_label.text() == "Processing cancelled"
+    assert window.progress_bar.value() < 100
+    assert window.cancel_button.isEnabled() is False
+    window.close()
+
+
+def test_closing_window_waits_for_worker_cancellation(qapp, tmp_path, monkeypatch):
+    root = _metadata_only_directory(tmp_path, "sample")
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+
+    def cancellable_job(request, report, cancel):
+        while not cancel():
+            time.sleep(0.005)
+        raise ComputationCancelled("cancelled while closing")
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.run_video_computation", cancellable_job)
+    window.start_processing()
+    window.close()
+
+    assert window._job_active is False
+    assert window._thread is None
+
+
 def _legacy_directory(tmp_path, stem, *, q_count=3, time_count=3):
     root = tmp_path
     (root / f"{stem}.avi").touch()
@@ -177,6 +286,24 @@ def _write_dataset(root, stem, *, q_count, time_count):
     np.save(f"{prefix}_DDM_matrix.npy", matrix)
     np.save(f"{prefix}_deltaTs.npy", np.linspace(0.01, 1.0, time_count))
     np.save(f"{prefix}_QS.npy", np.arange(1, q_count + 1, dtype=float) * 1e6)
+
+
+def _metadata_only_directory(tmp_path, stem):
+    root = tmp_path
+    (root / f"{stem}.avi").touch()
+    (root / f"{stem}.txt").write_text(
+        "framerate: 30\npixelsize: 1e-6\n", encoding="utf-8"
+    )
+    return root
+
+
+def _wait_for(qapp, predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        qapp.processEvents()
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition did not become true before timeout")
+        time.sleep(0.001)
 
 
 @pytest.fixture

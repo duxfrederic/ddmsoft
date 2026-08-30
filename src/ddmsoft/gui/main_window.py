@@ -7,7 +7,7 @@ from itertools import pairwise
 from math import isfinite
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -42,6 +43,12 @@ from ..io import (
     load_matrices,
 )
 from ..models import DDMData, VideoMetadata
+from .workers import (
+    ComputationResult,
+    ComputationWorker,
+    VideoComputationRequest,
+    run_video_computation,
+)
 
 
 class DDMMainWindow(QMainWindow):
@@ -58,6 +65,10 @@ class DDMMainWindow(QMainWindow):
         self._matrices: dict[Path, DDMData] = {}
         self._updating_video_table = False
         self._selected_matrix_path: Path | None = None
+        self._thread: QThread | None = None
+        self._worker: ComputationWorker | None = None
+        self._job_active = False
+        self._progress_value = 0
 
         self._build_menus()
         content = self._build_content()
@@ -76,6 +87,8 @@ class DDMMainWindow(QMainWindow):
             lambda: self.choose_directory(load_after_select=False)
         )
         self.load_button.clicked.connect(self.load_current_directory)
+        self.process_button.clicked.connect(self.start_processing)
+        self.cancel_button.clicked.connect(self.cancel_processing)
         self.video_table.cellChanged.connect(self._video_cell_changed)
         self.matrix_selector.currentIndexChanged.connect(self._matrix_selection_changed)
 
@@ -146,6 +159,14 @@ class DDMMainWindow(QMainWindow):
         layout.addWidget(self._build_computation_group())
         layout.addWidget(self._build_fitting_group())
         layout.addWidget(self._build_plotting_group())
+
+        self.error_details = QPlainTextEdit()
+        self.error_details.setObjectName("errorDetails")
+        self.error_details.setReadOnly(True)
+        self.error_details.setPlaceholderText("Worker error details will appear here.")
+        self.error_details.setMaximumHeight(180)
+        self.error_details.setVisible(False)
+        layout.addWidget(self.error_details)
 
         status_layout = QHBoxLayout()
         self.status_label = QLabel("Idle")
@@ -254,6 +275,10 @@ class DDMMainWindow(QMainWindow):
         self.process_button = QPushButton("Process")
         self.process_button.setObjectName("processButton")
         self.process_button.setToolTip("Compute DDM matrices for the listed videos")
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("cancelButton")
+        self.cancel_button.setToolTip("Request cooperative cancellation of the active computation")
+        self.cancel_button.setEnabled(False)
         self.direction_label = QLabel("Direction-dependent dynamics: split into")
         self.direction_spin = QSpinBox()
         self.direction_spin.setObjectName("directionSpin")
@@ -264,6 +289,7 @@ class DDMMainWindow(QMainWindow):
         )
         self.direction_suffix = QLabel("parts")
         process_layout.addWidget(self.process_button)
+        process_layout.addWidget(self.cancel_button)
         process_layout.addWidget(self.direction_label)
         process_layout.addWidget(self.direction_spin)
         process_layout.addWidget(self.direction_suffix)
@@ -443,7 +469,147 @@ class DDMMainWindow(QMainWindow):
         """Load the directory currently shown in the directory field."""
         return self.load_directory_data(self.directory_edit.text())
 
-    def load_directory_data(self, directory: str | Path) -> bool:
+    def start_processing(self) -> None:
+        """Start a sequential background computation from current UI values."""
+        if self._job_active:
+            return
+        try:
+            videos = self.video_metadata()
+        except ValueError as error:
+            self.status_label.setText(str(error))
+            self.status_label.setToolTip(str(error))
+            return
+        request = VideoComputationRequest(
+            videos=videos,
+            max_couples=self.max_couples_spin.value(),
+            points_per_decade=self.points_per_decade_spin.value(),
+            sectors=self.direction_spin.value(),
+            recompute=self.recompute_radio.isChecked(),
+        )
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._set_job_active(True)
+
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_video_computation(request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def cancel_processing(self) -> None:
+        """Request cooperative cancellation of the active computation."""
+        if self._worker is None or not self._job_active:
+            return
+        self._worker.request_cancel()
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("Cancellation requested")
+
+    def _set_job_active(self, active: bool) -> None:
+        widgets = (
+            self.directory_edit,
+            self.browse_button,
+            self.load_button,
+            self.keep_existing_radio,
+            self.recompute_radio,
+            self.max_couples_spin,
+            self.points_per_decade_spin,
+            self.video_table,
+            self.process_button,
+            self.direction_spin,
+            self.merge_button,
+            self.average_button,
+            self.matrix_selector,
+            self.model_selector,
+            self.q_min_slider,
+            self.q_max_slider,
+            self.time_min_slider,
+            self.time_max_slider,
+            self.initial_guess_button,
+            self.fit_button,
+            self.fitted_parameters_button,
+            self.temperature_edit,
+            self.viscosity_edit,
+            self.plot_matrix_button,
+            self.plot_amplitude_button,
+        )
+        for widget in widgets:
+            widget.setEnabled(not active)
+        for action in (
+            self.open_directory_action,
+            self.concatenate_action,
+            self.split_action,
+            self.show_matrix_action,
+            self.plot_correlation_action,
+            self.save_matrix_action,
+            self.save_fit_action,
+            self.fit_all_action,
+            self.save_correlation_action,
+            self.contin_action,
+            self.about_action,
+        ):
+            action.setEnabled(not active)
+        self.cancel_button.setEnabled(active)
+
+    def _worker_progress(self, stage: str, completed: int, total: int) -> None:
+        if total <= 0:
+            return
+        value = max(0, min(100, int(100 * completed / total)))
+        self._progress_value = max(self._progress_value, value)
+        self.progress_bar.setValue(self._progress_value)
+
+    def _worker_status(self, status: str) -> None:
+        self.status_label.setText(status)
+
+    def _worker_result(self, value: object) -> None:
+        if not isinstance(value, ComputationResult):
+            self._worker_failure("worker returned an invalid result", repr(value))
+            return
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        preferred = value.paths[0] if value.paths else None
+        self.load_directory_data(
+            Path(self.directory_edit.text()), preferred_matrix_path=preferred
+        )
+        self.status_label.setText(
+            f"Completed {len(value.processed_videos)} video(s); "
+            f"kept {len(value.kept_videos)} existing set(s)"
+        )
+
+    def _worker_failure(self, message: str, details: str) -> None:
+        self.error_details.setPlainText(details)
+        self.error_details.setVisible(True)
+        self.status_label.setText(f"Processing failed: {message}")
+        self.status_label.setToolTip(details)
+
+    def _worker_cancelled(self) -> None:
+        self.status_label.setText("Processing cancelled")
+
+    def _thread_finished(self) -> None:
+        self._thread = None
+        self._worker = None
+        self._job_active = False
+        self._set_job_active(False)
+        self._update_processing_state()
+        self._update_matrix_action_state()
+
+    def load_directory_data(
+        self, directory: str | Path, *, preferred_matrix_path: Path | None = None
+    ) -> bool:
         """Load metadata and matrix catalog data into the window.
 
         The method returns whether all video metadata loaded successfully. Matrix
@@ -472,7 +638,7 @@ class DDMMainWindow(QMainWindow):
             matrix_error = error
         else:
             matrix_error = None
-            self._populate_matrix_catalog(matrix_sets, matrices)
+            self._populate_matrix_catalog(matrix_sets, matrices, preferred_matrix_path)
 
         if metadata_error is not None:
             self.status_label.setText(f"Metadata invalid: {metadata_error}")
@@ -626,6 +792,11 @@ class DDMMainWindow(QMainWindow):
         return tuple(records)
 
     def _update_processing_state(self) -> None:
+        if self._job_active:
+            self.process_button.setEnabled(False)
+            self.concatenate_action.setEnabled(False)
+            self.split_action.setEnabled(False)
+            return
         metadata_valid = self.video_table.rowCount() > 0 and all(
             self._validate_video_row(row, update_state=False)[0]
             for row in range(self.video_table.rowCount())
@@ -635,7 +806,10 @@ class DDMMainWindow(QMainWindow):
         self.split_action.setEnabled(metadata_valid and self.video_table.rowCount() == 1)
 
     def _populate_matrix_catalog(
-        self, matrix_sets: Sequence[MatrixFileSet], matrices: dict[Path, DDMData]
+        self,
+        matrix_sets: Sequence[MatrixFileSet],
+        matrices: dict[Path, DDMData],
+        preferred_matrix_path: Path | None = None,
     ) -> None:
         names = display_names(matrix_sets)
         self._matrices = dict(matrices)
@@ -646,8 +820,14 @@ class DDMMainWindow(QMainWindow):
             for name, path in names.items():
                 if path in self._matrices:
                     self.matrix_selector.addItem(name, path)
+            selected_index = 1
+            if preferred_matrix_path is not None:
+                for index in range(1, self.matrix_selector.count()):
+                    if self.matrix_selector.itemData(index) == preferred_matrix_path:
+                        selected_index = index
+                        break
             if self.matrix_selector.count() > 1:
-                self.matrix_selector.setCurrentIndex(1)
+                self.matrix_selector.setCurrentIndex(selected_index)
         finally:
             self.matrix_selector.blockSignals(False)
         self._matrix_selection_changed(self.matrix_selector.currentIndex())
@@ -692,6 +872,37 @@ class DDMMainWindow(QMainWindow):
         return self._selected_matrix_path
 
     def _update_matrix_action_state(self) -> None:
+        if self._job_active:
+            for widget in (
+                self.model_selector,
+                self.q_min_slider,
+                self.q_max_slider,
+                self.time_min_slider,
+                self.time_max_slider,
+                self.initial_guess_button,
+                self.fit_button,
+                self.fitted_parameters_button,
+                self.plot_matrix_button,
+                self.plot_amplitude_button,
+            ):
+                widget.setEnabled(False)
+            self.merge_button.setEnabled(False)
+            self.average_button.setEnabled(False)
+            for action in (
+                self.open_directory_action,
+                self.concatenate_action,
+                self.split_action,
+                self.show_matrix_action,
+                self.plot_correlation_action,
+                self.save_matrix_action,
+                self.save_fit_action,
+                self.fit_all_action,
+                self.save_correlation_action,
+                self.contin_action,
+                self.about_action,
+            ):
+                action.setEnabled(False)
+            return
         has_matrix = self.selected_matrix is not None
         has_catalog = bool(self._matrices)
         has_multiple = len(self._matrices) > 1
@@ -747,6 +958,7 @@ class DDMMainWindow(QMainWindow):
             self.points_per_decade_spin,
             self.video_table,
             self.process_button,
+            self.cancel_button,
             self.direction_spin,
             self.merge_button,
             self.average_button,
@@ -850,6 +1062,15 @@ class DDMMainWindow(QMainWindow):
         upper.blockSignals(False)
 
     def closeEvent(self, event: object) -> None:
+        if self._job_active and self._thread is not None:
+            self.cancel_processing()
+            if not self._thread.wait(10_000):
+                self.status_label.setText("Cancellation is still in progress")
+                event.ignore()
+                return
+            self._job_active = False
+            self._thread = None
+            self._worker = None
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("last_directory", self.directory_edit.text())
         self._settings.sync()
