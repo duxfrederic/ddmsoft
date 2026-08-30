@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 10 are complete. The work was committed separately:
+Work packages 0 through 11 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -13,6 +13,7 @@ Work packages 0 through 10 are complete. The work was committed separately:
 - `2601b99` `feat: add independent Qt plot controllers`
 - `c94ca60` `feat: add responsive Qt main window shell`
 - `6ab0162` `feat: wire directory and matrix selection workflow`
+- `87666c1` `feat: add background computation workflow`
 
 ## Package 0
 
@@ -165,6 +166,22 @@ Work packages 0 through 10 are complete. The work was committed separately:
 - Added offscreen GUI coverage for directory dialogs, metadata loading and
   editing, invalid metadata, matrix selection, range clamping, and action state.
 
+## Package 11
+
+- Added a single Qt `QThread`/`QObject` worker abstraction with progress, status,
+  result, cancellation, failure, and completion signals.
+- Added sequential video computation using the public OpenCV DDM and matrix I/O
+  APIs, reporting loading, FFT, temporal averaging, and saving stages.
+- Added cooperative cancellation and transactional staging so cancelled or
+  failed jobs do not expose partial matrix sets.
+- Wired Process and Cancel into the main window, disabled conflicting controls
+  during active jobs, refreshed the matrix catalog on success, and selected the
+  newly produced output.
+- Added a read-only traceback details view, concise failure status, safe close
+  cancellation/waiting, and keep-existing/recompute enforcement.
+- Added timer-driven offscreen tests for responsiveness, progress monotonicity,
+  worker failures, cancellation, output safety, and GUI lifecycle behavior.
+
 ## Verification
 
 - `python -m pytest`: 57 passed after packages 3 through 7.
@@ -177,6 +194,7 @@ Work packages 0 through 10 are complete. The work was committed separately:
   python -m pytest` passed with 60 tests.
 - Package 9 verification: the same command passed with 63 tests.
 - Package 10 verification: the same command passed with 67 tests.
+- Package 11 verification: the same command passed with 76 tests.
 - Scoped Ruff checks and bytecode compilation passed in the `ddmsoft` Python
   3.14.7 environment.
 - `conda run -n ddmsoft python -m ddmsoft --version` passed.
