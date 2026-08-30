@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 
 from ddmsoft.contin import run_contin
+from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.models import DDMData, FitRange
 from ddmsoft.plotting import (
     CONTINPlotController,
     CorrelationPlotController,
     MatrixPlotController,
 )
-from ddmsoft.fitting import default_fit_request, fit_ddm
 
 
 @pytest.fixture

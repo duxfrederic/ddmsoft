@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
