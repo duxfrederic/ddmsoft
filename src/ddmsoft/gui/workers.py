@@ -11,10 +11,18 @@ from threading import Event
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..engine import ComputationCancelled, compute_video_ddm
+from ..contin import CONTINCancelled, CONTINResult, run_contin_scan
+from ..engine import ComputationCancelled, compute_video_ddm, read_video_frames
 from ..fitting import FitCancelled, fit_ddm, get_model
-from ..io import LEGACY_SUFFIXES, save_fit_text, save_matrix_set
-from ..models import DDMData, FitRequest, FitResult, VideoMetadata
+from ..io import (
+    LEGACY_SUFFIXES,
+    save_fit_text,
+    save_matrix_set,
+    save_partitioned_matrix_sets,
+)
+from ..media import FFmpegCancelled, concatenate_videos
+from ..models import DDMData, FitRange, FitRequest, FitResult, VideoMetadata
+from ..time_dependent import compute_time_dependent_ddm
 
 ProgressCallback = Callable[[str, int, int], None]
 CancelCallback = Callable[[], bool]
@@ -27,7 +35,7 @@ class VideoComputationRequest:
 
     videos: tuple[VideoMetadata, ...]
     max_couples: int
-    points_per_decade: int | float
+    points_per_decade: float
     sectors: int
     recompute: bool
 
@@ -89,6 +97,69 @@ class BatchFitResult:
     failures: tuple[tuple[Path, str], ...]
 
 
+@dataclass(frozen=True)
+class TimeDependentComputationRequest:
+    """Inputs for sequential partitioned DDM computation."""
+
+    videos: tuple[VideoMetadata, ...]
+    partitions: int
+    max_couples: int
+    points_per_decade: float
+    sectors: int
+    recompute: bool = False
+
+
+@dataclass(frozen=True)
+class TimeDependentComputationResult:
+    """Partitioned matrix paths produced for each source video."""
+
+    paths: tuple[Path, ...]
+    processed_videos: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class CONTINComputationRequest:
+    """Inputs for one q-index CONTIN scan."""
+
+    matrix_path: Path
+    data: DDMData
+    q_index: int
+    fit_range: FitRange
+    gamma_min: float
+    gamma_max: float
+    gamma_count: int
+    alpha_min: float
+    alpha_max: float
+    alpha_count: int
+    maxiter: int
+
+
+@dataclass(frozen=True)
+class CONTINComputationResult:
+    """A CONTIN result retaining its matrix and q identities."""
+
+    matrix_path: Path
+    q_index: int
+    fit_range: FitRange
+    result: CONTINResult
+
+
+@dataclass(frozen=True)
+class VideoConcatenationRequest:
+    """Inputs for one ffmpeg concat job."""
+
+    videos: tuple[Path, ...]
+    output: Path
+    overwrite: bool = False
+
+
+@dataclass(frozen=True)
+class VideoConcatenationResult:
+    """Output path from a completed video concat job."""
+
+    output: Path
+
+
 class ComputationWorker(QObject):
     """Run one plain callable on a ``QThread`` with cooperative cancellation."""
 
@@ -115,11 +186,8 @@ class ComputationWorker(QObject):
     def run(self) -> None:
         try:
             value = self._work(self._report, self.is_cancelled)
-            if self.is_cancelled():
-                self.cancelled.emit()
-            else:
-                self.result.emit(value)
-        except (ComputationCancelled, FitCancelled):
+            self.result.emit(value)
+        except (ComputationCancelled, CONTINCancelled, FFmpegCancelled, FitCancelled):
             self.cancelled.emit()
         except Exception as error:  # noqa: BLE001 - workers must relay all failures
             message = str(error) or error.__class__.__name__
@@ -278,6 +346,133 @@ def run_batch_fit(
     return BatchFitResult(tuple(results), tuple(output_paths), tuple(failures))
 
 
+def run_time_dependent_computation(
+    request: TimeDependentComputationRequest,
+    progress: ProgressCallback,
+    cancel: CancelCallback,
+) -> TimeDependentComputationResult:
+    """Compute and save every requested source-frame partition sequentially."""
+    if not request.videos:
+        raise ValueError("at least one video is required")
+    if request.partitions < 1:
+        raise ValueError("partitions must be positive")
+    total = len(request.videos) * request.partitions
+    paths: list[Path] = []
+    processed: list[Path] = []
+    for video_index, metadata in enumerate(request.videos):
+        offset = video_index * request.partitions
+
+        def partition_progress(
+            stage: str,
+            completed: int,
+            partition_total: int,
+            video_name: str = metadata.path.name,
+            video_offset: int = offset,
+        ) -> None:
+            progress(f"time dependent {video_name}", video_offset + completed, total)
+
+        datasets = compute_time_dependent_ddm(
+            read_video_frames(metadata.path),
+            metadata.frame_rate,
+            metadata.pixel_size,
+            request.partitions,
+            max_couples=request.max_couples,
+            points_per_decade=request.points_per_decade,
+            sectors=request.sectors,
+            progress=partition_progress,
+            cancel=cancel,
+        )
+        if cancel():
+            raise ComputationCancelled("time-dependent DDM cancelled before saving")
+        output_prefix = metadata.path.parent / "ddm_matrices" / metadata.path.stem
+        output_prefix.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".ddmsoft-stage-", dir=output_prefix.parent) as staging:
+            staged_paths = save_partitioned_matrix_sets(Path(staging) / output_prefix.name, datasets)
+            if cancel():
+                raise ComputationCancelled("time-dependent DDM cancelled before committing")
+            staged_targets = tuple(
+                (staged_path, output_prefix.parent / staged_path.name)
+                for staged_path in staged_paths
+            )
+            existing = tuple(target for _, target in staged_targets if target.exists())
+            if existing and not request.recompute:
+                names = ", ".join(str(path) for path in existing)
+                raise FileExistsError(
+                    f"time-dependent output already exists: {names}; select recompute to replace it"
+                )
+            current_targets = {target for _, target in staged_targets}
+            stale_paths = (
+                tuple(
+                    path
+                    for path in output_prefix.parent.glob("*.npy")
+                    if path.name.startswith(f"{output_prefix.name}__i=")
+                    and path not in current_targets
+                )
+                if request.recompute
+                else ()
+            )
+            _commit_staged(
+                staged_targets,
+                recompute=request.recompute,
+                stale_paths=stale_paths,
+            )
+            committed_paths = [target for _, target in staged_targets]
+        paths.extend(committed_paths)
+        processed.append(metadata.path)
+        progress(f"time dependent {metadata.path.name}", offset + request.partitions, total)
+    progress("complete", total, total)
+    return TimeDependentComputationResult(tuple(paths), tuple(processed))
+
+
+def run_contin_computation(
+    request: CONTINComputationRequest,
+    progress: ProgressCallback,
+    cancel: CancelCallback,
+) -> CONTINComputationResult:
+    """Run CONTIN for one inclusive time range and q index."""
+    if request.q_index >= request.data.q_values.size:
+        raise ValueError("CONTIN q index exceeds available q values")
+    _, time_slice = request.fit_range.to_slices()
+    if request.q_index < 0:
+        raise ValueError("CONTIN q index must be non-negative")
+    q_value = request.data.q_values[request.q_index]
+    tau = request.data.lag_times[time_slice] * q_value**2
+    ddmdata = request.data.matrix[time_slice, request.q_index]
+    result = run_contin_scan(
+        tau,
+        ddmdata,
+        request.gamma_min,
+        request.gamma_max,
+        request.gamma_count,
+        request.alpha_min,
+        request.alpha_max,
+        request.alpha_count,
+        maxiter=request.maxiter,
+        progress=lambda completed, total: progress("contin", completed, total),
+        cancel=cancel,
+    )
+    return CONTINComputationResult(request.matrix_path, request.q_index, request.fit_range, result)
+
+
+def run_video_concatenation(
+    request: VideoConcatenationRequest,
+    progress: ProgressCallback,
+    cancel: CancelCallback,
+) -> VideoConcatenationResult:
+    """Run safe ffmpeg concatenation in the shared worker abstraction."""
+    if cancel():
+        raise ComputationCancelled("video concatenation cancelled")
+    progress("concatenating", 0, 1)
+    output = concatenate_videos(
+        request.videos,
+        request.output,
+        overwrite=request.overwrite,
+        cancel=cancel,
+    )
+    progress("concatenating", 1, 1)
+    return VideoConcatenationResult(output)
+
+
 def batch_fit_target_paths(
     output_prefix: str | Path, matrix_paths: Iterable[str | Path]
 ) -> tuple[Path, ...]:
@@ -314,10 +509,19 @@ def _matrix_paths(prefix: Path | Sequence[Path]) -> tuple[Path, ...]:
     return tuple(Path(path) for path in prefix)
 
 
-def _commit_staged(staged_paths: Sequence[tuple[Path, Path]], *, recompute: bool) -> None:
+def _commit_staged(
+    staged_paths: Sequence[tuple[Path, Path]],
+    *,
+    recompute: bool,
+    stale_paths: Sequence[Path] = (),
+) -> None:
     committed: list[Path] = []
     backups: list[tuple[Path, Path]] = []
     try:
+        for index, target in enumerate(stale_paths):
+            backup = staged_paths[0][0].parent / f".stale-{index}-{target.name}"
+            target.replace(backup)
+            backups.append((backup, target))
         for index, (staged, target) in enumerate(staged_paths):
             backup = staged.parent / f".backup-{index}-{target.name}"
             if target.exists():
@@ -358,6 +562,8 @@ def _scaled_progress(completed: int, total: int, span: int) -> int:
 
 
 def _stage_label(stage: str) -> str:
+    if stage.startswith("time dependent "):
+        return f"Time-dependent DDM: {stage.removeprefix('time dependent ')}"
     if stage.startswith("batch fitting "):
         return f"Fitting {stage.removeprefix('batch fitting ')}"
     if stage.startswith("batch complete "):
@@ -372,6 +578,8 @@ def _stage_label(stage: str) -> str:
         "saving": "Saving DDM matrices",
         "keeping": "Keeping existing matrices",
         "fitting": "Fitting correlation curves",
+        "contin": "Computing CONTIN candidates",
+        "concatenating": "Concatenating videos",
         "complete": "Computation complete",
     }.get(stage, stage.replace("_", " ").capitalize())
 
@@ -379,13 +587,22 @@ def _stage_label(stage: str) -> str:
 __all__ = [
     "BatchFitRequest",
     "BatchFitResult",
+    "CONTINComputationRequest",
+    "CONTINComputationResult",
     "ComputationResult",
     "ComputationWorker",
     "FitComputationRequest",
     "FitComputationResult",
+    "TimeDependentComputationRequest",
+    "TimeDependentComputationResult",
     "VideoComputationRequest",
+    "VideoConcatenationRequest",
+    "VideoConcatenationResult",
     "batch_fit_target_paths",
     "run_batch_fit",
+    "run_contin_computation",
     "run_fit",
+    "run_time_dependent_computation",
     "run_video_computation",
+    "run_video_concatenation",
 ]

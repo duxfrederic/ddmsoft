@@ -28,9 +28,9 @@ class PartitionedDDM:
 def partition_frame_ranges(frame_count: int, partitions: int) -> tuple[tuple[int, int], ...]:
     """Return array-split-equivalent half-open ranges covering every frame."""
     if isinstance(frame_count, bool) or not isinstance(frame_count, (int, np.integer)):
-        raise ValueError("frame_count must be an integer")
+        raise TypeError("frame_count must be an integer")
     if isinstance(partitions, bool) or not isinstance(partitions, (int, np.integer)):
-        raise ValueError("partitions must be an integer")
+        raise TypeError("partitions must be an integer")
     frame_count = int(frame_count)
     partitions = int(partitions)
     if frame_count < 1:
@@ -56,23 +56,25 @@ def compute_time_dependent_ddm(
     partitions: int,
     *,
     max_couples: int = 300,
-    points_per_decade: int | float = 20,
+    points_per_decade: float = 20,
     sectors: int = 1,
     progress: Callable[[str, int, int], None] | None = None,
     cancel: Callable[[], bool] | object | None = None,
 ) -> tuple[PartitionedDDM, ...]:
     """Compute each partition sequentially, preserving actual frame starts."""
-    source = list(frames)
+    source = []
+    for frame in frames:
+        if _cancel_requested(cancel):
+            raise ComputationCancelled("time-dependent DDM cancelled while reading frames")
+        source.append(frame)
     ranges = partition_frame_ranges(len(source), partitions)
+    if any(stop - start < 2 for start, stop in ranges):
+        raise ValueError("each time-dependent partition must contain at least two frames")
     results: list[PartitionedDDM] = []
     for index, (start, stop) in enumerate(ranges):
         if _cancel_requested(cancel):
             raise ComputationCancelled("time-dependent DDM cancelled before a partition")
         subset = source[start:stop]
-        if len(subset) < 2:
-            raise ValueError(
-                f"partition {index} contains {len(subset)} frame; at least two are required per DDM"
-            )
         result = compute_ddm(
             subset,
             frame_rate,

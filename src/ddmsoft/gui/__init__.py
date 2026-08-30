@@ -1,5 +1,11 @@
 """Qt user-interface components for DDMSoft."""
 
+from .advanced_dialogs import (
+    CONTINDialog,
+    TimeDependentDialog,
+    VideoSelectionDialog,
+    VideoSelectionWidget,
+)
 from .main_window import DDMMainWindow, create_main_window
 from .selection import (
     BatchFitDialog,
@@ -12,19 +18,31 @@ from .workers import (
     BatchFitResult,
     ComputationResult,
     ComputationWorker,
+    CONTINComputationRequest,
+    CONTINComputationResult,
     FitComputationRequest,
     FitComputationResult,
+    TimeDependentComputationRequest,
+    TimeDependentComputationResult,
     VideoComputationRequest,
+    VideoConcatenationRequest,
+    VideoConcatenationResult,
     batch_fit_target_paths,
     run_batch_fit,
+    run_contin_computation,
     run_fit,
+    run_time_dependent_computation,
     run_video_computation,
+    run_video_concatenation,
 )
 
 __all__ = [
     "BatchFitDialog",
     "BatchFitRequest",
     "BatchFitResult",
+    "CONTINComputationRequest",
+    "CONTINComputationResult",
+    "CONTINDialog",
     "ComputationResult",
     "ComputationWorker",
     "DDMMainWindow",
@@ -33,10 +51,20 @@ __all__ = [
     "MatrixSelectionDialog",
     "MatrixSelectionWidget",
     "OutputPathDialog",
+    "TimeDependentComputationRequest",
+    "TimeDependentComputationResult",
+    "TimeDependentDialog",
     "VideoComputationRequest",
+    "VideoConcatenationRequest",
+    "VideoConcatenationResult",
+    "VideoSelectionDialog",
+    "VideoSelectionWidget",
     "batch_fit_target_paths",
     "create_main_window",
     "run_batch_fit",
+    "run_contin_computation",
     "run_fit",
+    "run_time_dependent_computation",
     "run_video_computation",
+    "run_video_concatenation",
 ]

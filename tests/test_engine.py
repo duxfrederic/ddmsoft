@@ -5,12 +5,14 @@ import pytest
 
 from ddmsoft.engine import (
     ComputationCancelled,
+    RadialAverager,
     VideoReadError,
     compute_ddm,
     log_spaced_lags,
 )
 from ddmsoft.io import save_matrix_set
 from ddmsoft.models import DDMData
+
 from .fixtures import constant_frames, direct_ddm_reference, random_frames
 
 
@@ -103,6 +105,34 @@ def test_directional_output_has_one_dataset_per_sector():
     assert all(dataset.matrix.shape == (result[0].matrix.shape[0], 4) for dataset in result)
 
 
+def test_directional_masks_assign_each_nonorigin_fourier_pixel_to_one_sector():
+    averager = RadialAverager((8, 8), sectors=2)
+    memberships = np.sum(np.stack(averager._masks), axis=0)
+
+    assert memberships[0, 0] == 2
+    nonorigin = np.ones((8, 8), dtype=bool)
+    nonorigin[0, 0] = False
+    assert np.all(memberships[nonorigin & (averager.distances <= 0.5)] == 1)
+
+    horizontal_power = np.zeros((8, 8))
+    horizontal_power[0, 1:4] = 1.0
+    first, second = averager(horizontal_power)
+    assert np.any(first > 0)
+    assert np.allclose(second, 0)
+
+
+def test_oriented_grating_has_independent_directional_reference_response():
+    columns = np.arange(16, dtype=float)[None, :]
+    frames = [
+        np.repeat(np.sin(2 * np.pi * (columns - shift / 4) / 8), 16, axis=0)
+        for shift in range(12)
+    ]
+
+    horizontal, vertical = compute_ddm(frames, 10, 1e-6, sectors=2)
+
+    assert np.max(horizontal.matrix) > 1_000 * max(np.max(vertical.matrix), 1e-12)
+
+
 def test_atomic_matrix_set_save_uses_legacy_names(tmp_path):
     data = DDMData(np.ones((2, 2)), np.array([0.1, 0.2]), np.array([1.0, 2.0]))
     paths = save_matrix_set(tmp_path / "run", data)
@@ -111,7 +141,7 @@ def test_atomic_matrix_set_save_uses_legacy_names(tmp_path):
 
 
 def test_opencv_reader_releases_capture_on_failure(monkeypatch, tmp_path):
-    import ddmsoft.engine as engine
+    from ddmsoft import engine
 
     class FakeCapture:
         released = False

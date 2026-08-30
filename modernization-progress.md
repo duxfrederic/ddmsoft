@@ -240,3 +240,29 @@ The untracked `roadmap.md` is user-provided and was intentionally not committed.
 - Package 13 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
   python -m pytest` passed with 92 tests; scoped Ruff, bytecode compilation,
   and `git diff --check` passed.
+
+## Package 14
+
+- Restored directional sector processing through the existing DDM engine and
+  documented its opposite-direction/180-degree convention in the computation
+  control tooltip.
+- Added validated video selection and time-dependent partition dialogs with
+  editable per-video frame rate and pixel size values.  Partitioned outputs
+  retain their actual source-frame start tokens and remain discoverable through
+  the normal matrix catalog.
+- Added time-dependent, CONTIN, and video-concatenation jobs to the shared
+  cancellable Qt worker system.
+- Added a validated CONTIN dialog for q selection, gamma and alpha ranges,
+  candidate counts, and iteration limits.  Gamma and alpha use documented
+  legacy linear spacing rather than an unannounced scientific change.
+- Added independent CONTIN candidate plots with alpha-slider navigation and
+  candidate-aware text exports, including optional SI size conversion.
+- Added ffmpeg concatenation through a temporary output and concat input file,
+  with escaped paths, return-code checks, and explicit missing-executable
+  errors.  Timestamp renaming remains excluded because the parity review marks
+  it as unreachable functionality.
+- Added directional end-to-end, time-dependent frame-accounting, advanced
+  dialog, worker, CONTIN, export, and media error-handling coverage.
+- Package 14 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
+  python -m pytest` passed with 123 tests; scoped Ruff, bytecode compilation,
+  and `git diff --check` passed.

@@ -42,7 +42,7 @@ class ComputationCancelled(DDMEngineError):
 
 def _positive_number(value: float, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"{name} must be a finite positive number")
+        raise TypeError(f"{name} must be a finite positive number")
     result = float(value)
     if not np.isfinite(result) or result <= 0:
         raise ValueError(f"{name} must be a finite positive number")
@@ -135,10 +135,10 @@ def read_video_frames(path: str | Path) -> OpenCVFrameReader:
     return OpenCVFrameReader(path)
 
 
-def log_spaced_lags(frame_count: int, points_per_decade: int | float = 20) -> np.ndarray:
+def log_spaced_lags(frame_count: int, points_per_decade: float = 20) -> np.ndarray:
     """Return unique increasing integer lags in ``[1, frame_count - 1]``."""
     if isinstance(frame_count, bool) or not isinstance(frame_count, (int, np.integer)):
-        raise ValueError("frame_count must be an integer")
+        raise TypeError("frame_count must be an integer")
     frame_count = int(frame_count)
     if frame_count < 2:
         raise ValueError("at least two frames are required")
@@ -179,14 +179,10 @@ class RadialAverager:
         if self.sectors == 1:
             self._masks = (self.distances <= 0.5,)
         else:
-            args = np.arctan(
-                np.divide(
-                    np.fft.fftfreq(size)[None, :],
-                    np.fft.fftfreq(size)[:, None],
-                    out=np.full((size, size), np.nan),
-                    where=np.fft.fftfreq(size)[:, None] != 0,
-                )
-            ) + np.pi / 2
+            with np.errstate(divide="ignore", invalid="ignore"):
+                args = np.arctan(
+                    np.fft.fftfreq(size)[None, :] / np.fft.fftfreq(size)[:, None]
+                ) + np.pi / 2
             edges = np.arange(-0.5, self.sectors + 0.01) / self.sectors * np.pi
             args[args > (self.sectors - 0.5) / self.sectors * np.pi] -= np.pi
             edges[0] -= 1e-10
@@ -251,7 +247,7 @@ def compute_ddm(
     pixel_size: float,
     *,
     max_couples: int = 300,
-    points_per_decade: int | float = 20,
+    points_per_decade: float = 20,
     sectors: int = 1,
     progress: ProgressCallback | None = None,
     cancel: Callable[[], bool] | object | None = None,
@@ -292,7 +288,7 @@ def compute_ddm(
         if _cancel_requested(cancel):
             raise ComputationCancelled("DDM computation cancelled during lag averaging")
         starts = range(0, frame_count - int(lag), increment)
-        accumulated = np.zeros((sectors, *averager.shape), dtype=float)
+        accumulated = np.zeros(averager.shape, dtype=float)
         used = 0
         for start in starts:
             if _cancel_requested(cancel):
@@ -302,8 +298,7 @@ def compute_ddm(
             used += 1
         if used == 0:
             raise DDMEngineError(f"no frame pairs available for lag {lag}")
-        for sector in range(sectors):
-            curve = averager(accumulated[sector] / used)[sector]
+        for sector, curve in enumerate(averager(accumulated / used)):
             matrices[sector][lag_index] = curve
         _report(progress, "lag_average", lag_index + 1, lags.size)
 

@@ -145,7 +145,7 @@ class CONTINResult:
 
     def with_particle_sizes(
         self, temperature_kelvin: float, viscosity_pa_s: float
-    ) -> "CONTINResult":
+    ) -> CONTINResult:
         """Return a copy with each diffusion rate converted to a radius in metres."""
         sizes = gamma_to_radius(self.gamma_range, temperature_kelvin, viscosity_pa_s)
         return replace(self, sizes=sizes)
@@ -326,11 +326,17 @@ def run_contin(
         for _ in range(int(maxiter)):
             if _cancel_requested(cancel):
                 raise CONTINCancelled("CONTIN cancelled during optimizer iterations")
+
+            def check_cancel(candidate_values: np.ndarray) -> None:
+                if _cancel_requested(cancel):
+                    raise CONTINCancelled("CONTIN cancelled during an optimizer iteration")
+
             solution = minimize(
                 regularized_square_sum,
                 candidate,
                 args=(data, convolution, float(alpha_value), weight_values),
                 method="Nelder-Mead",
+                callback=check_cancel,
             )
             candidate = np.abs(np.asarray(solution.x, dtype=float))
             residual = float(solution.fun)

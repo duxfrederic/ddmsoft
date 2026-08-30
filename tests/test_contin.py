@@ -77,6 +77,25 @@ def test_contin_cancellation_happens_between_alpha_candidates():
         )
 
 
+def test_contin_cancellation_interrupts_optimizer_iteration(monkeypatch):
+    tau, gamma, data = _synthetic_data()
+
+    def fake_minimize(function, candidate, *, args, method, callback):
+        callback(candidate)
+        raise AssertionError("callback should cancel")
+
+    monkeypatch.setattr("ddmsoft.contin.minimize", fake_minimize)
+    checks = 0
+
+    def cancel():
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with pytest.raises(CONTINCancelled, match="optimizer iteration"):
+        run_contin(tau, data, gamma, maxiter=1, cancel=cancel)
+
+
 def test_contin_export_uses_each_candidate_amplitude_and_noise(tmp_path):
     tau, gamma, data = _synthetic_data()
     result = run_contin(tau, data, gamma, alpha=[0.01, 0.1], maxiter=1)

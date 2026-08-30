@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..combining import CombinationError, average_ddm, merge_ddm
+from ..contin import CONTINResult, export_contin
 from ..fitting import (
     MODEL_REGISTRY,
     default_fit_request,
@@ -59,11 +60,13 @@ from ..io import (
 from ..models import DDMData, FitRange, FitRequest, FitResult, VideoMetadata
 from ..plotting import (
     AmplitudeNoiseDiffusionPlotController,
+    CONTINPlotController,
     CorrelationPlotController,
     FitParameterPlotController,
     MatrixPlotController,
 )
 from ..science import water_viscosity
+from .advanced_dialogs import CONTINDialog, TimeDependentDialog, VideoSelectionDialog
 from .fit_dialog import InitialGuessDialog
 from .selection import (
     BatchFitDialog,
@@ -76,13 +79,22 @@ from .workers import (
     BatchFitResult,
     ComputationResult,
     ComputationWorker,
+    CONTINComputationRequest,
+    CONTINComputationResult,
     FitComputationRequest,
     FitComputationResult,
+    TimeDependentComputationRequest,
+    TimeDependentComputationResult,
     VideoComputationRequest,
+    VideoConcatenationRequest,
+    VideoConcatenationResult,
     batch_fit_target_paths,
     run_batch_fit,
+    run_contin_computation,
     run_fit,
+    run_time_dependent_computation,
     run_video_computation,
+    run_video_concatenation,
 )
 
 
@@ -101,6 +113,10 @@ class DDMMainWindow(QMainWindow):
         self._matrix_names: dict[Path, str] = {}
         self._fit_results: dict[Path, FitResult] = {}
         self._fit_requests: dict[Path, FitRequest] = {}
+        self._contin_results: dict[tuple[Path, int], CONTINResult] = {}
+        self._contin_ranges: dict[tuple[Path, int], FitRange] = {}
+        self._contin_save_all: dict[tuple[Path, int], bool] = {}
+        self._selected_contin_key: tuple[Path, int] | None = None
         self._fit_preferences: dict[
             str, tuple[tuple[float | None, ...], tuple[bool, ...]]
         ] = {}
@@ -112,6 +128,7 @@ class DDMMainWindow(QMainWindow):
         self._job_active = False
         self._job_kind: str | None = None
         self._progress_value = 0
+        self._closing = False
 
         self._build_menus()
         content = self._build_content()
@@ -147,6 +164,10 @@ class DDMMainWindow(QMainWindow):
         self.save_fit_action.triggered.connect(self.export_selected_fit)
         self.save_correlation_action.triggered.connect(self.export_selected_correlation)
         self.fit_all_action.triggered.connect(self.start_batch_fitting)
+        self.concatenate_action.triggered.connect(self.concatenate_selected_videos)
+        self.split_action.triggered.connect(self.start_time_dependent_processing)
+        self.contin_action.triggered.connect(self.start_contin)
+        self.save_contin_action.triggered.connect(self.export_selected_contin)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -197,7 +218,9 @@ class DDMMainWindow(QMainWindow):
         fitting_menu = self.menuBar().addMenu("More Fitting")
         self.contin_action = QAction("CONTIN", self)
         self.contin_action.setObjectName("continAction")
-        fitting_menu.addAction(self.contin_action)
+        self.save_contin_action = QAction("Save the current CONTIN result", self)
+        self.save_contin_action.setObjectName("saveContinAction")
+        fitting_menu.addActions((self.contin_action, self.save_contin_action))
 
         help_menu = self.menuBar().addMenu("Help")
         self.about_action = QAction("About...", self)
@@ -341,7 +364,12 @@ class DDMMainWindow(QMainWindow):
         self.direction_spin.setRange(1, 360)
         self.direction_spin.setValue(1)
         self.direction_spin.setToolTip(
-            "Number of directional sectors; one uses the normal isotropic calculation"
+            "Number of opposite-direction sectors across 180 degrees; one uses "
+            "the normal isotropic calculation. Legacy convention: sector 0 is "
+            "centered on the horizontal Fourier axis; angles are "
+            "atan(q-column/q-row) + 90 degrees modulo 180, with lower edges "
+            "excluded and upper edges included. Filename angles are sector "
+            "centers and increase counter-clockwise in image coordinates."
         )
         self.direction_suffix = QLabel("parts")
         process_layout.addWidget(self.process_button)
@@ -564,6 +592,7 @@ class DDMMainWindow(QMainWindow):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         thread.start()
@@ -625,6 +654,7 @@ class DDMMainWindow(QMainWindow):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         thread.start()
@@ -950,12 +980,15 @@ class DDMMainWindow(QMainWindow):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         thread.start()
         return True
 
     def _batch_worker_result(self, value: object) -> None:
+        if self._closing:
+            return
         if not isinstance(value, BatchFitResult):
             self._worker_failure("worker returned an invalid batch result", repr(value))
             return
@@ -975,6 +1008,269 @@ class DDMMainWindow(QMainWindow):
             f"{len(value.failures)} failed"
         )
         self._update_matrix_action_state()
+
+    def start_time_dependent_processing(self) -> bool:
+        """Select videos and compute all validated time partitions in a worker."""
+        if self._job_active:
+            return False
+        try:
+            videos = {video.path: video for video in self.video_metadata()}
+        except ValueError as error:
+            self.status_label.setText(str(error))
+            return False
+        dialog = TimeDependentDialog(videos, parent=self)
+        self._time_dependent_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        request = TimeDependentComputationRequest(
+            dialog.selected_videos,
+            dialog.partitions,
+            self.max_couples_spin.value(),
+            self.points_per_decade_spin.value(),
+            self.direction_spin.value(),
+            self.recompute_radio.isChecked(),
+        )
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._job_kind = "time-dependent DDM"
+        self._set_job_active(True)
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_time_dependent_computation(request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._time_dependent_worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+        return True
+
+    def _time_dependent_worker_result(self, value: object) -> None:
+        if self._closing:
+            return
+        if not isinstance(value, TimeDependentComputationResult):
+            self._worker_failure("worker returned an invalid time-dependent result", repr(value))
+            return
+        preferred = value.paths[0] if value.paths else None
+        self.load_directory_data(
+            Path(self.directory_edit.text()), preferred_matrix_path=preferred
+        )
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        self.status_label.setText(
+            f"Computed {len(value.paths)} partitioned matrix file(s) for "
+            f"{len(value.processed_videos)} video(s)"
+        )
+
+    def concatenate_selected_videos(self) -> bool:
+        """Select videos and concatenate them through a background ffmpeg job."""
+        if self._job_active:
+            return False
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select the directory containing videos to concatenate",
+            self.directory_edit.text() or self._last_directory(),
+        )
+        if not directory:
+            return False
+        videos = {
+            path: path.name
+            for path in sorted(Path(directory).glob("*.avi"), key=lambda path: path.name.casefold())
+        }
+        if len(videos) < 2:
+            self.status_label.setText("At least two AVI videos are required")
+            return False
+        dialog = VideoSelectionDialog(videos, minimum=2, title="Select videos to concatenate", parent=self)
+        self._video_selection_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        default_output = Path(directory) / "concatenated"
+        prefix = self._choose_output_prefix(default_output, (".avi",))
+        if prefix is None:
+            return False
+        output = output_target_paths(prefix, (".avi",))[0]
+        request = VideoConcatenationRequest(dialog.selected_paths, output, overwrite=output.exists())
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._job_kind = "concatenating"
+        self._set_job_active(True)
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_video_concatenation(request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._concatenation_worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+        return True
+
+    def _concatenation_worker_result(self, value: object) -> None:
+        if self._closing:
+            return
+        if not isinstance(value, VideoConcatenationResult):
+            self._worker_failure("worker returned an invalid concatenation result", repr(value))
+            return
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        self.status_label.setText(f"Concatenated video: {value.output.name}")
+
+    def start_contin(self) -> bool:
+        """Open validated CONTIN controls and run one q-index scan in a worker."""
+        if self._job_active:
+            return False
+        data = self.selected_matrix
+        path = self._selected_matrix_path
+        if data is None or path is None:
+            self.status_label.setText("No matrix selected")
+            return False
+        time_count = self.time_max_slider.value() - self.time_min_slider.value() + 1
+        if time_count < 3:
+            self.status_label.setText("CONTIN requires at least three time points")
+            return False
+        dialog = CONTINDialog(
+            data.q_values.size,
+            q_index=(self.q_min_slider.value() + self.q_max_slider.value()) // 2,
+            parent=self,
+        )
+        self._contin_dialog = dialog
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        fit_range = FitRange(
+            dialog.q_index,
+            dialog.q_index,
+            self.time_min_slider.value(),
+            self.time_max_slider.value(),
+        )
+        request = CONTINComputationRequest(
+            path,
+            data,
+            dialog.q_index,
+            fit_range,
+            dialog.gamma_min,
+            dialog.gamma_max,
+            dialog.gamma_count,
+            dialog.alpha_min,
+            dialog.alpha_max,
+            dialog.alpha_count,
+            dialog.maxiter,
+        )
+        key = (path, dialog.q_index)
+        self._contin_save_all[key] = dialog.save_all
+        self._contin_results.pop(key, None)
+        self._contin_ranges.pop(key, None)
+        self._selected_contin_key = key
+        self.error_details.clear()
+        self.error_details.setVisible(False)
+        self._progress_value = 0
+        self.progress_bar.setValue(0)
+        self._job_active = True
+        self._job_kind = "contin"
+        self._set_job_active(True)
+        thread = QThread(self)
+        worker = ComputationWorker(
+            lambda progress, cancel: run_contin_computation(request, progress, cancel)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._worker_progress)
+        worker.status.connect(self._worker_status)
+        worker.result.connect(self._contin_worker_result)
+        worker.failure.connect(self._worker_failure)
+        worker.cancelled.connect(self._worker_cancelled)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+        return True
+
+    def _contin_worker_result(self, value: object) -> None:
+        if self._closing:
+            return
+        if not isinstance(value, CONTINComputationResult):
+            self._worker_failure("worker returned an invalid CONTIN result", repr(value))
+            return
+        result = value.result
+        try:
+            viscosity, temperature = self._fit_export_conditions()
+            if viscosity is not None and temperature is not None:
+                kelvin = temperature + 273.15 if temperature < 150.0 else temperature
+                result = result.with_particle_sizes(kelvin, viscosity)
+        except ValueError as error:
+            self._worker_failure(f"could not convert CONTIN sizes: {error}", str(error))
+            return
+        key = (value.matrix_path, value.q_index)
+        self._contin_results[key] = result
+        self._contin_ranges[key] = value.fit_range
+        self._selected_contin_key = key
+        controller = CONTINPlotController(
+            result,
+            title=f"CONTIN: {value.matrix_path.name}, q index {value.q_index}",
+        )
+        self._show_plot(controller)
+        self.progress_bar.setValue(100)
+        self._progress_value = 100
+        self.status_label.setText(
+            f"CONTIN complete for {value.matrix_path.name}, q index {value.q_index}"
+        )
+        self._update_matrix_action_state()
+
+    def export_selected_contin(self) -> bool:
+        """Export the selected CONTIN candidate set."""
+        key = self._selected_contin_key
+        if key is None or key not in self._contin_results:
+            self.status_label.setText("Compute a CONTIN result first")
+            return False
+        path, q_index = key
+        result = self._contin_results[key]
+        prefix = self._choose_output_prefix(
+            path.parent / f"{self._matrix_stem(path)}_contin_q{q_index}", (".txt",)
+        )
+        if prefix is None:
+            return False
+        output = output_target_paths(prefix, (".txt",))[0]
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            saved = export_contin(
+                output,
+                result,
+                video=path,
+                q=float(self._matrices[path].q_values[q_index]),
+                all_alphas=self._contin_save_all.get(key, True),
+            )
+        except (OSError, TypeError, ValueError) as error:
+            self.status_label.setText(f"CONTIN export failed: {error}")
+            self.status_label.setToolTip(str(error))
+            return False
+        self.status_label.setText(f"Exported CONTIN result: {saved.name}")
+        return True
 
     def cancel_processing(self) -> None:
         """Request cooperative cancellation of the active computation."""
@@ -1025,6 +1321,7 @@ class DDMMainWindow(QMainWindow):
             self.fit_all_action,
             self.save_correlation_action,
             self.contin_action,
+            self.save_contin_action,
             self.about_action,
         ):
             action.setEnabled(not active)
@@ -1041,6 +1338,8 @@ class DDMMainWindow(QMainWindow):
         self.status_label.setText(status)
 
     def _worker_result(self, value: object) -> None:
+        if self._closing:
+            return
         if not isinstance(value, ComputationResult):
             self._worker_failure("worker returned an invalid result", repr(value))
             return
@@ -1056,6 +1355,8 @@ class DDMMainWindow(QMainWindow):
         )
 
     def _fit_worker_result(self, value: object) -> None:
+        if self._closing:
+            return
         if not isinstance(value, FitComputationResult):
             self._worker_failure("worker returned an invalid fit result", repr(value))
             return
@@ -1078,6 +1379,9 @@ class DDMMainWindow(QMainWindow):
         operation = {
             "fitting": "Fitting",
             "batch fitting": "Batch fitting",
+            "time-dependent DDM": "Time-dependent DDM",
+            "contin": "CONTIN",
+            "concatenating": "Video concatenation",
         }.get(self._job_kind, "Processing")
         self.status_label.setText(f"{operation} failed: {message}")
         self.status_label.setToolTip(details)
@@ -1086,6 +1390,9 @@ class DDMMainWindow(QMainWindow):
         operation = {
             "fitting": "Fitting",
             "batch fitting": "Batch fitting",
+            "time-dependent DDM": "Time-dependent DDM",
+            "contin": "CONTIN",
+            "concatenating": "Video concatenation",
         }.get(self._job_kind, "Processing")
         self.status_label.setText(f"{operation} cancelled")
 
@@ -1293,8 +1600,8 @@ class DDMMainWindow(QMainWindow):
             for row in range(self.video_table.rowCount())
         )
         self.process_button.setEnabled(metadata_valid)
-        self.concatenate_action.setEnabled(metadata_valid and self.video_table.rowCount() > 1)
-        self.split_action.setEnabled(metadata_valid and self.video_table.rowCount() == 1)
+        self.concatenate_action.setEnabled(True)
+        self.split_action.setEnabled(metadata_valid)
 
     def _populate_matrix_catalog(
         self,
@@ -1307,6 +1614,10 @@ class DDMMainWindow(QMainWindow):
         self._matrix_names = {path: name for name, path in names.items()}
         self._fit_results.clear()
         self._fit_requests.clear()
+        self._contin_results.clear()
+        self._contin_ranges.clear()
+        self._contin_save_all.clear()
+        self._selected_contin_key = None
         self.matrix_selector.blockSignals(True)
         try:
             self.matrix_selector.clear()
@@ -1331,6 +1642,10 @@ class DDMMainWindow(QMainWindow):
         self._matrix_names = {}
         self._fit_results.clear()
         self._fit_requests.clear()
+        self._contin_results.clear()
+        self._contin_ranges.clear()
+        self._contin_save_all.clear()
+        self._selected_contin_key = None
         self._selected_matrix_path = None
         self.matrix_selector.blockSignals(True)
         try:
@@ -1346,6 +1661,11 @@ class DDMMainWindow(QMainWindow):
         path = Path(selected) if selected is not None else None
         data = self._matrices.get(path) if path is not None else None
         self._selected_matrix_path = path if data is not None else None
+        if self._selected_contin_key is None or self._selected_contin_key[0] != self._selected_matrix_path:
+            self._selected_contin_key = next(
+                (key for key in self._contin_results if key[0] == self._selected_matrix_path),
+                None,
+            )
         if data is None:
             self.set_axis_values((), ())
             self.status_label.setText("No matrix selected")
@@ -1387,6 +1707,15 @@ class DDMMainWindow(QMainWindow):
             else None
         )
         return request.fit_range if request is not None else None
+
+    @property
+    def selected_contin(self) -> CONTINResult | None:
+        """Return the CONTIN result attached to the selected matrix and q index."""
+        return (
+            self._contin_results.get(self._selected_contin_key)
+            if self._selected_contin_key is not None
+            else None
+        )
 
     def plot_selected_matrix(self) -> object | None:
         """Open an independent measured/fitted matrix window."""
@@ -1471,6 +1800,7 @@ class DDMMainWindow(QMainWindow):
                 self.fit_all_action,
                 self.save_correlation_action,
                 self.contin_action,
+                self.save_contin_action,
                 self.about_action,
             ):
                 action.setEnabled(False)
@@ -1501,6 +1831,11 @@ class DDMMainWindow(QMainWindow):
         self.fit_all_action.setEnabled(has_catalog)
         self.save_correlation_action.setEnabled(has_fit)
         self.contin_action.setEnabled(has_matrix)
+        self.save_contin_action.setEnabled(
+            self._selected_contin_key is not None
+            and self._selected_contin_key in self._contin_results
+            and has_matrix
+        )
 
     def _install_responsive_central_widget(self, content: QWidget) -> None:
         screen = self.screen()
@@ -1635,10 +1970,12 @@ class DDMMainWindow(QMainWindow):
         upper.blockSignals(False)
 
     def closeEvent(self, event: object) -> None:
+        self._closing = True
         if self._job_active and self._thread is not None:
             self.cancel_processing()
             if not self._thread.wait(10_000):
                 self.status_label.setText("Cancellation is still in progress")
+                self._closing = False
                 event.ignore()
                 return
             self._job_active = False

@@ -7,18 +7,23 @@ import pytest
 from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
+from ddmsoft.contin import run_contin
 from ddmsoft.engine import ComputationCancelled
 from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.gui.main_window import DDMMainWindow
 from ddmsoft.gui.workers import (
     ComputationResult,
+    CONTINComputationResult,
     FitComputationResult,
+    TimeDependentComputationResult,
+    VideoConcatenationResult,
     batch_fit_target_paths,
 )
 from ddmsoft.io import save_matrix_set
 from ddmsoft.models import DDMData, FitRange, VideoMetadata
 from ddmsoft.plotting import (
     AmplitudeNoiseDiffusionPlotController,
+    CONTINPlotController,
     CorrelationPlotController,
     FitParameterPlotController,
     MatrixPlotController,
@@ -212,6 +217,41 @@ def test_processing_uses_worker_and_refreshes_catalog_without_blocking(qapp, tmp
     assert "Completed 1 video" in window.status_label.text()
     assert window.process_button.isEnabled()
     assert window.selected_matrix_path == root / "ddm_matrices" / "sample_DDM_matrix.npy"
+    window.close()
+
+
+def test_directional_processing_discovers_selects_plots_and_fits_each_sector(
+    qapp, tmp_path, monkeypatch
+):
+    root = _metadata_only_directory(tmp_path, "sample")
+    columns = np.arange(16, dtype=float)[None, :]
+    frames = [
+        np.repeat(np.sin(2 * np.pi * (columns - shift / 4) / 8), 16, axis=0)
+        for shift in range(12)
+    ]
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    window.direction_spin.setValue(2)
+    monkeypatch.setattr("ddmsoft.engine.read_video_frames", lambda path: iter(frames))
+    window.start_processing()
+    _wait_for(qapp, lambda: not window._job_active)
+
+    assert window.matrix_selector.count() == 3
+    first_path = window.matrix_selector.itemData(1)
+    second_path = window.matrix_selector.itemData(2)
+    assert not np.allclose(
+        window._matrices[first_path].matrix,
+        window._matrices[second_path].matrix,
+    )
+    window.matrix_selector.setCurrentIndex(1)
+    assert window.selected_matrix_path == first_path
+    assert isinstance(window.plot_selected_matrix(), MatrixPlotController)
+    window.model_selector.setCurrentIndex(window.model_selector.findData("stretch"))
+    window.start_fitting()
+    _wait_for(qapp, lambda: not window._job_active)
+    assert window.selected_fit is not None
     window.close()
 
 
@@ -474,6 +514,150 @@ def test_batch_fit_main_window_stores_results_by_full_path(qapp, tmp_path, monke
     assert set(window._fit_results) == set(selected)
     assert all(path.is_file() for path in batch_fit_target_paths(batch_prefix, selected))
     assert "2 succeeded" in window.status_label.text()
+    window.close()
+
+
+def test_time_dependent_main_window_runs_selected_videos_and_refreshes_catalog(
+    qapp, tmp_path, monkeypatch
+):
+    root = _metadata_only_directory(tmp_path, "sample")
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    video = VideoMetadata(root / "sample.avi", 30.0, 1e-6)
+
+    class AcceptedTimeDependentDialog:
+        DialogCode = QDialog.DialogCode
+        selected_videos = (video,)
+        partitions = 2
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    def fake_job(request, report, cancel):
+        assert request.videos == (video,)
+        output_directory = root / "ddm_matrices"
+        output_directory.mkdir(exist_ok=True)
+        paths = save_matrix_set(
+            output_directory / "sample__i=0__",
+            DDMData(np.ones((2, 2)), np.array([0.01, 0.1]), np.array([1e6, 2e6])),
+        )
+        return TimeDependentComputationResult(paths, (video.path,))
+
+    monkeypatch.setattr("ddmsoft.gui.main_window.TimeDependentDialog", AcceptedTimeDependentDialog)
+    monkeypatch.setattr("ddmsoft.gui.main_window.run_time_dependent_computation", fake_job)
+    assert window.start_time_dependent_processing()
+    _wait_for(qapp, lambda: not window._job_active)
+
+    assert window.selected_matrix_path == root / "ddm_matrices" / "sample__i=0___DDM_matrix.npy"
+    assert "1 video(s)" in window.status_label.text()
+    window.close()
+
+
+def test_video_concatenation_selects_arbitrary_avi_directory_without_metadata(
+    qapp, tmp_path, monkeypatch
+):
+    first = tmp_path / "first.avi"
+    second = tmp_path / "second.avi"
+    first.touch()
+    second.touch()
+    output_prefix = tmp_path / "joined"
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+
+    class AcceptedVideoDialog:
+        DialogCode = QDialog.DialogCode
+        selected_paths = (first, second)
+
+        def __init__(self, videos, **kwargs):
+            assert set(videos) == {first, second}
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        "ddmsoft.gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *args: str(tmp_path),
+    )
+    monkeypatch.setattr("ddmsoft.gui.main_window.VideoSelectionDialog", AcceptedVideoDialog)
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+    monkeypatch.setattr(
+        "ddmsoft.gui.main_window.run_video_concatenation",
+        lambda request, progress, cancel: VideoConcatenationResult(request.output),
+    )
+
+    assert window.concatenate_selected_videos()
+    _wait_for(qapp, lambda: not window._job_active)
+    assert window.status_label.text() == "Concatenated video: joined.avi"
+    window.close()
+
+
+def test_contin_main_window_keeps_independent_result_and_exports_candidates(
+    qapp, tmp_path, monkeypatch
+):
+    root = _metadata_only_directory(tmp_path, "sample")
+    data = generate_model_data("stretch")
+    write_legacy_matrix(root, "sample", data)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    path = window.selected_matrix_path
+    result = run_contin(
+        np.linspace(0.01, 0.2, data.matrix.shape[0]),
+        np.linspace(0.1, 0.8, data.matrix.shape[0]),
+        np.linspace(1.0, 5.0, 5),
+        alpha=(0.01, 0.1),
+        maxiter=1,
+    )
+    value = CONTINComputationResult(path, 1, FitRange(0, 3, 0, 6), result)
+    window._contin_save_all[(path, 1)] = True
+    window._contin_worker_result(value)
+
+    assert window.selected_contin is result
+    assert isinstance(window._plot_controllers[-1], CONTINPlotController)
+    output_prefix = tmp_path / "contin_export"
+    monkeypatch.setattr(window, "_choose_output_prefix", lambda *args: output_prefix)
+    assert window.export_selected_contin()
+    output = output_prefix.with_suffix(".txt")
+    assert output.is_file()
+    assert output.read_text(encoding="utf-8").count("\nalpha:") == 2
+    window.close()
+
+
+def test_contin_result_selection_follows_matrix_selection(qapp, tmp_path):
+    root = _legacy_directory(tmp_path, "first", q_count=3, time_count=4)
+    _write_dataset(root, "second", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    first_path = window.matrix_selector.itemData(1)
+    window._contin_results[(first_path, 0)] = object()
+    window.matrix_selector.setCurrentIndex(2)
+    assert window._selected_contin_key is None
+    window.matrix_selector.setCurrentIndex(1)
+    assert window._selected_contin_key == (first_path, 0)
+    window.close()
+
+
+def test_closing_window_ignores_queued_contin_result(qapp, tmp_path):
+    root = _legacy_directory(tmp_path, "sample", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+    window._closing = True
+
+    window._contin_worker_result(object())
+
+    assert window._plot_controllers == []
+    window._closing = False
     window.close()
 
 
