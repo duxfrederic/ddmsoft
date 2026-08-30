@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddmsoft"
+version = "0.1.0"
+description = "Native desktop tools for differential dynamic microscopy"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "DDMSoft contributors"}]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "opencv-python",
+    "PySide6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "ruff",
+]
+
+[project.scripts]
+ddmsoft = "ddmsoft.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ddmsoft = ["resources/*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
