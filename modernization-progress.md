@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 9 are complete. The work was committed separately:
+Work packages 0 through 10 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -12,6 +12,7 @@ Work packages 0 through 9 are complete. The work was committed separately:
 - `ad9a5b2` `feat: isolate CONTIN backend`
 - `2601b99` `feat: add independent Qt plot controllers`
 - `c94ca60` `feat: add responsive Qt main window shell`
+- `6ab0162` `feat: wire directory and matrix selection workflow`
 
 ## Package 0
 
@@ -146,6 +147,24 @@ Work packages 0 through 9 are complete. The work was committed separately:
 - Updated the explicit package launcher to open the native shell.
 - Added offscreen Qt tests for control mapping, range behavior, and settings.
 
+## Package 10
+
+- Wired native directory selection and loading to the public metadata and matrix
+  I/O APIs.
+- Populated the editable video metadata table with path/name, frame rate, pixel
+  size, and validation state.
+- Added immediate, non-destructive row/cell validation and structured
+  `VideoMetadata` extraction; invalid rows disable processing and identify the
+  exact field.
+- Populated the matrix selector with display names backed by full matrix paths,
+  selected the first available matrix, and exposed the selected `DDMData`.
+- Updated q/time slider bounds and physical labels on matrix selection while
+  preserving or clamping inclusive ranges.
+- Disabled actions that require metadata or matrix selections instead of
+  relying on exception dialogs.
+- Added offscreen GUI coverage for directory dialogs, metadata loading and
+  editing, invalid metadata, matrix selection, range clamping, and action state.
+
 ## Verification
 
 - `python -m pytest`: 57 passed after packages 3 through 7.
@@ -157,6 +176,7 @@ Work packages 0 through 9 are complete. The work was committed separately:
 - Package 8 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
   python -m pytest` passed with 60 tests.
 - Package 9 verification: the same command passed with 63 tests.
+- Package 10 verification: the same command passed with 67 tests.
 - Scoped Ruff checks and bytecode compilation passed in the `ddmsoft` Python
   3.14.7 environment.
 - `conda run -n ddmsoft python -m ddmsoft --version` passed.
