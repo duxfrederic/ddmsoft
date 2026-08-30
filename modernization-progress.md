@@ -1,12 +1,13 @@
 # Modernization Progress
 
-Work packages 0 through 4 are complete. The work was committed separately:
+Work packages 0 through 5 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
 - `c8dd76c` `test: add backend contracts and fixtures`
 - `51ad485` `feat: add metadata and matrix I/O`
 - `7d8854f` `feat: add OpenCV DDM engine`
+- `f0884eb` `feat: add structured fitting API`
 
 ## Package 0
 
@@ -72,11 +73,29 @@ Work packages 0 through 4 are complete. The work was committed separately:
 - Added deterministic tests for constant, random, directional, short, invalid,
   rectangular, cancellation, progress, atomic-save, and OpenCV cleanup cases.
 
+## Package 5
+
+- Added the Qt-free `ddmsoft.fitting` API and a single model registry for all
+  eight legacy model identifiers, including stable IDs, display labels,
+  functions, parameter definitions, and defaults.
+- Added structured fitting from `DDMData` and `FitRequest` with inclusive q and
+  time ranges, per-q A/B estimates aligned to the selected q slice, and
+  returned correlation/fitted curves generated from the returned parameters.
+- Preserved Nelder-Mead fitting and legacy model formulas while scaling optimizer
+  coordinates for the existing SI-valued parameters.
+- Added per-q convergence status and messages, continuation after an optimizer
+  failure, progress/cancellation hooks, and caller-input immutability.
+- Corrected the deterministic cumulant fixture parameters to use the SI scale
+  implied by their model formula, keeping generated data numerically meaningful.
+- Added generated-data coverage for every model, inclusive final positions,
+  nonzero q-min alignment, fixed values, failure continuation, and cancellation.
+
 ## Verification
 
-- `python -m pytest`: 27 passed after packages 3 and 4.
+- `python -m pytest`: 41 passed after packages 3 through 5.
 - Package 3 was committed as `51ad485`.
 - Package 4 verification passes locally in `7d8854f`.
+- Package 5 verification passes locally in `f0884eb`.
 - Package launcher, packaged resource loading, and Qt-free imports were checked.
 - The local environment is Python 3.11.13; the package declares the roadmap's
   Python 3.12 and 3.14 target. Ruff was not installed locally, so CI should run
