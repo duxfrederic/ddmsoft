@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 7 are complete. The work was committed separately:
+Work packages 0 through 9 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
@@ -10,6 +10,8 @@ Work packages 0 through 7 are complete. The work was committed separately:
 - `f0884eb` `feat: add structured fitting API`
 - `46108f8` `feat: add pure DDM combination workflows`
 - `ad9a5b2` `feat: isolate CONTIN backend`
+- `2601b99` `feat: add independent Qt plot controllers`
+- `c94ca60` `feat: add responsive Qt main window shell`
 
 ## Package 0
 
@@ -118,6 +120,32 @@ Work packages 0 through 7 are complete. The work was committed separately:
 - Added optional SI diffusion-rate to hydrodynamic-radius conversion and tests
   for candidate retention, validation, cancellation, export, and conversion.
 
+## Package 8
+
+- Removed the hard-coded TkAgg backend from the legacy plotting module.
+- Added independent Qt/Matplotlib correlation, matrix, and CONTIN plot
+  controllers with modeless windows, navigation toolbars, and controller-owned
+  artists, data, sliders, and callbacks.
+- Preserved q and alpha slider navigation, keyboard and mouse-wheel controls,
+  physical-value labels, selected time markers, measured/fitted overlays, and
+  CONTIN distribution updates.
+- Added offscreen figure-construction and callback tests, including independent
+  window lifetime coverage.
+
+## Package 9
+
+- Added a responsive PySide6 `DDMMainWindow` with computation, fitting,
+  plotting, and status/progress sections in the legacy vertical order.
+- Recreated the legacy menu categories and action grouping without wiring
+  expensive backend work into the window class.
+- Replaced the editable video-description text with an editable metadata table,
+  preserved keep/recompute choices, selectors, range sliders, physical-value
+  labels, fitting controls, temperature/viscosity fields, and direction count.
+- Added workflow tab order, accessible labels/tooltips, constrained-screen
+  scrolling, and `QSettings` persistence for geometry and last directory.
+- Updated the explicit package launcher to open the native shell.
+- Added offscreen Qt tests for control mapping, range behavior, and settings.
+
 ## Verification
 
 - `python -m pytest`: 57 passed after packages 3 through 7.
@@ -126,9 +154,14 @@ Work packages 0 through 7 are complete. The work was committed separately:
 - Package 5 verification passes locally in `f0884eb`.
 - Package 6 verification passes locally in `46108f8`.
 - Package 7 verification passes locally in `ad9a5b2`.
+- Package 8 verification: `QT_QPA_PLATFORM=offscreen conda run -n ddmsoft
+  python -m pytest` passed with 60 tests.
+- Package 9 verification: the same command passed with 63 tests.
+- Scoped Ruff checks and bytecode compilation passed in the `ddmsoft` Python
+  3.14.7 environment.
+- `conda run -n ddmsoft python -m ddmsoft --version` passed.
 - Package launcher, packaged resource loading, and Qt-free imports were checked.
-- The local environment is Python 3.11.13; the package declares the roadmap's
-  Python 3.12 and 3.14 target. Ruff was not installed locally, so CI should run
-  the configured Ruff check.
+- The package declares Python 3.12 and 3.14 support; current verification used
+  Python 3.14.7 in the `ddmsoft` environment.
 
 The untracked `roadmap.md` is user-provided and was intentionally not committed.
