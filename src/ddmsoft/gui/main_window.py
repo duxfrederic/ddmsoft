@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from itertools import pairwise
+from math import isfinite
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
@@ -11,6 +12,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -25,11 +27,21 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..fitting import MODEL_REGISTRY
+from ..io import (
+    DDMIOError,
+    MatrixFileSet,
+    discover_matrix_sets,
+    display_names,
+    load_directory,
+    load_matrices,
+)
+from ..models import DDMData, VideoMetadata
 
 
 class DDMMainWindow(QMainWindow):
@@ -43,12 +55,29 @@ class DDMMainWindow(QMainWindow):
         self._settings = settings if settings is not None else QSettings("DDMSoft", "DDMSoft")
         self._q_values: tuple[float, ...] = ()
         self._lag_times: tuple[float, ...] = ()
+        self._matrices: dict[Path, DDMData] = {}
+        self._updating_video_table = False
+        self._selected_matrix_path: Path | None = None
 
         self._build_menus()
         content = self._build_content()
         self._install_responsive_central_widget(content)
         self._set_tab_order()
+        self._connect_workflow_signals()
+        self._update_processing_state()
+        self._update_matrix_action_state()
         self._restore_window_state()
+
+    def _connect_workflow_signals(self) -> None:
+        self.open_directory_action.triggered.connect(
+            lambda: self.choose_directory(load_after_select=True)
+        )
+        self.browse_button.clicked.connect(
+            lambda: self.choose_directory(load_after_select=False)
+        )
+        self.load_button.clicked.connect(self.load_current_directory)
+        self.video_table.cellChanged.connect(self._video_cell_changed)
+        self.matrix_selector.currentIndexChanged.connect(self._matrix_selection_changed)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -80,9 +109,13 @@ class DDMMainWindow(QMainWindow):
 
         export_menu = self.menuBar().addMenu("Batch, export")
         self.save_matrix_action = QAction("Save the DDM matrix as a text file", self)
+        self.save_matrix_action.setObjectName("saveMatrixAction")
         self.save_fit_action = QAction("Save the current fit parameters", self)
+        self.save_fit_action.setObjectName("saveFitAction")
         self.fit_all_action = QAction("Fit and save all the matrices", self)
+        self.fit_all_action.setObjectName("fitAllAction")
         self.save_correlation_action = QAction("Save the correlation functions", self)
+        self.save_correlation_action.setObjectName("saveCorrelationAction")
         export_menu.addActions(
             (
                 self.save_matrix_action,
@@ -391,6 +424,299 @@ class DDMMainWindow(QMainWindow):
         buttons.addStretch(1)
         layout.addLayout(buttons)
         return group
+
+    def choose_directory(self, *, load_after_select: bool = True) -> str | None:
+        """Choose an acquisition directory and optionally load it immediately."""
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Open DDM directory",
+            self.directory_edit.text() or self._last_directory(),
+        )
+        if not selected:
+            return None
+        self.directory_edit.setText(selected)
+        if load_after_select:
+            self.load_directory_data(selected)
+        return selected
+
+    def load_current_directory(self) -> bool:
+        """Load the directory currently shown in the directory field."""
+        return self.load_directory_data(self.directory_edit.text())
+
+    def load_directory_data(self, directory: str | Path) -> bool:
+        """Load metadata and matrix catalog data into the window.
+
+        The method returns whether all video metadata loaded successfully. Matrix
+        discovery is performed independently so an invalid metadata file does not
+        hide already available matrices.
+        """
+        root = Path(directory).expanduser()
+        self.directory_edit.setText(str(root))
+        self._settings.setValue("last_directory", str(root))
+
+        metadata_error: DDMIOError | None = None
+        try:
+            metadata = load_directory(root)
+        except DDMIOError as error:
+            metadata = {}
+            metadata_error = error
+            self._populate_invalid_video_rows(root, error)
+        else:
+            self._populate_video_table(metadata)
+
+        try:
+            matrix_sets = discover_matrix_sets(root, strict=False)
+            matrices = load_matrices(root, strict=False)
+        except DDMIOError as error:
+            self._clear_matrix_catalog()
+            matrix_error = error
+        else:
+            matrix_error = None
+            self._populate_matrix_catalog(matrix_sets, matrices)
+
+        if metadata_error is not None:
+            self.status_label.setText(f"Metadata invalid: {metadata_error}")
+            self.status_label.setToolTip(str(metadata_error))
+        elif matrix_error is not None:
+            self.status_label.setText(f"Matrix loading failed: {matrix_error}")
+            self.status_label.setToolTip(str(matrix_error))
+        else:
+            self.status_label.setText(
+                f"Loaded {len(metadata)} video(s) and {len(self._matrices)} matrix/matrices"
+            )
+            self.status_label.setToolTip(str(root))
+        self._update_processing_state()
+        self._update_matrix_action_state()
+        return metadata_error is None
+
+    def _populate_video_table(self, metadata: dict[Path, VideoMetadata]) -> None:
+        rows = sorted(metadata.values(), key=lambda item: str(item.path).casefold())
+        self._updating_video_table = True
+        try:
+            self.video_table.setRowCount(0)
+            for row, record in enumerate(rows):
+                self.video_table.insertRow(row)
+                self._set_video_item(row, 0, str(record.path))
+                self._set_video_item(row, 1, f"{record.frame_rate:.12g}")
+                self._set_video_item(row, 2, f"{record.pixel_size:.12g}")
+                self._set_video_item(row, 3, "Valid", editable=False)
+        finally:
+            self._updating_video_table = False
+        for row in range(self.video_table.rowCount()):
+            self._validate_video_row(row)
+
+    def _populate_invalid_video_rows(self, directory: Path, error: DDMIOError) -> None:
+        try:
+            videos = sorted(
+                (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".avi"),
+                key=lambda path: path.name.casefold(),
+            )
+        except OSError:
+            videos = []
+        self._updating_video_table = True
+        try:
+            self.video_table.setRowCount(0)
+            for row, video in enumerate(videos):
+                self.video_table.insertRow(row)
+                self._set_video_item(row, 0, str(video))
+                self._set_video_item(row, 1, "")
+                self._set_video_item(row, 2, "")
+                self._set_video_item(row, 3, f"Invalid metadata: {error}", editable=False)
+                for column in range(1, 4):
+                    item = self.video_table.item(row, column)
+                    if item is not None:
+                        item.setToolTip(str(error))
+        finally:
+            self._updating_video_table = False
+
+    def _set_video_item(self, row: int, column: int, text: str, *, editable: bool = True) -> None:
+        item = QTableWidgetItem(text)
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.video_table.setItem(row, column, item)
+
+    def _video_cell_changed(self, row: int, column: int) -> None:
+        if self._updating_video_table or column == 3:
+            return
+        valid, field, message = self._validate_video_row(row)
+        if valid:
+            self._update_processing_state()
+            return
+        self.status_label.setText(f"Metadata error in row {row + 1}, {field}: {message}")
+        self.status_label.setToolTip(message)
+        self._update_processing_state()
+
+    def _validate_video_row(
+        self, row: int, *, update_state: bool = True
+    ) -> tuple[bool, str, str]:
+        fields = (
+            (0, "path / name"),
+            (1, "frame rate"),
+            (2, "pixel size"),
+        )
+        for column, field in fields:
+            item = self.video_table.item(row, column)
+            text = item.text().strip() if item is not None else ""
+            if not text:
+                return self._validation_result(
+                    row, column, field, "value is required", update_state
+                )
+            if column == 0:
+                if Path(text).suffix.lower() != ".avi":
+                    return self._validation_result(
+                        row, column, field, "must name an AVI file", update_state
+                    )
+                continue
+            try:
+                value = float(text)
+            except ValueError:
+                return self._validation_result(row, column, field, "must be numeric", update_state)
+            if not isfinite(value) or value <= 0:
+                return self._validation_result(
+                    row, column, field, "must be finite and positive", update_state
+                )
+        if update_state:
+            self._set_row_validation(row, 3, "", "")
+        return True, "", ""
+
+    def _validation_result(
+        self, row: int, column: int, field: str, message: str, update_state: bool
+    ) -> tuple[bool, str, str]:
+        if update_state:
+            self._set_row_validation(row, column, field, message)
+        return False, field, message
+
+    def _set_row_validation(
+        self, row: int, column: int, field: str, message: str
+    ) -> tuple[bool, str, str]:
+        state_item = self.video_table.item(row, 3)
+        if state_item is None:
+            self._updating_video_table = True
+            try:
+                self._set_video_item(row, 3, "", editable=False)
+            finally:
+                self._updating_video_table = False
+            state_item = self.video_table.item(row, 3)
+        if state_item is not None:
+            state_item.setText("Valid" if not message else f"Invalid: {field} ({message})")
+            state_item.setToolTip("" if not message else f"{field}: {message}")
+        for index in range(3):
+            item = self.video_table.item(row, index)
+            if item is not None:
+                item.setToolTip(f"{field}: {message}" if index == column and message else "")
+        return not message, field, message
+
+    def video_metadata(self) -> tuple[VideoMetadata, ...]:
+        """Return validated, structured metadata currently shown in the table."""
+        records: list[VideoMetadata] = []
+        errors: list[str] = []
+        for row in range(self.video_table.rowCount()):
+            valid, field, message = self._validate_video_row(row)
+            if not valid:
+                errors.append(f"row {row + 1}, {field}: {message}")
+                continue
+            path = Path(self.video_table.item(row, 0).text().strip())
+            frame_rate = float(self.video_table.item(row, 1).text())
+            pixel_size = float(self.video_table.item(row, 2).text())
+            records.append(VideoMetadata(path, frame_rate, pixel_size))
+        if errors:
+            raise ValueError("invalid video metadata: " + "; ".join(errors))
+        if not records:
+            raise ValueError("no video metadata is loaded")
+        return tuple(records)
+
+    def _update_processing_state(self) -> None:
+        metadata_valid = self.video_table.rowCount() > 0 and all(
+            self._validate_video_row(row, update_state=False)[0]
+            for row in range(self.video_table.rowCount())
+        )
+        self.process_button.setEnabled(metadata_valid)
+        self.concatenate_action.setEnabled(metadata_valid and self.video_table.rowCount() > 1)
+        self.split_action.setEnabled(metadata_valid and self.video_table.rowCount() == 1)
+
+    def _populate_matrix_catalog(
+        self, matrix_sets: Sequence[MatrixFileSet], matrices: dict[Path, DDMData]
+    ) -> None:
+        names = display_names(matrix_sets)
+        self._matrices = dict(matrices)
+        self.matrix_selector.blockSignals(True)
+        try:
+            self.matrix_selector.clear()
+            self.matrix_selector.addItem("No matrix loaded", None)
+            for name, path in names.items():
+                if path in self._matrices:
+                    self.matrix_selector.addItem(name, path)
+            if self.matrix_selector.count() > 1:
+                self.matrix_selector.setCurrentIndex(1)
+        finally:
+            self.matrix_selector.blockSignals(False)
+        self._matrix_selection_changed(self.matrix_selector.currentIndex())
+
+    def _clear_matrix_catalog(self) -> None:
+        self._matrices = {}
+        self._selected_matrix_path = None
+        self.matrix_selector.blockSignals(True)
+        try:
+            self.matrix_selector.clear()
+            self.matrix_selector.addItem("No matrix loaded", None)
+        finally:
+            self.matrix_selector.blockSignals(False)
+        self.set_axis_values((), ())
+        self._update_matrix_action_state()
+
+    def _matrix_selection_changed(self, index: int) -> None:
+        selected = self.matrix_selector.itemData(index)
+        path = Path(selected) if selected is not None else None
+        data = self._matrices.get(path) if path is not None else None
+        self._selected_matrix_path = path if data is not None else None
+        if data is None:
+            self.set_axis_values((), ())
+            self.status_label.setText("No matrix selected")
+        else:
+            self.set_axis_values(data.q_values, data.lag_times)
+            self.status_label.setText(f"Selected matrix: {path.name}")
+        self._update_matrix_action_state()
+
+    @property
+    def selected_matrix(self) -> DDMData | None:
+        """Return the selected matrix for later workflow stages."""
+        return (
+            self._matrices.get(self._selected_matrix_path)
+            if self._selected_matrix_path is not None
+            else None
+        )
+
+    @property
+    def selected_matrix_path(self) -> Path | None:
+        """Return the full path backing the selected matrix display name."""
+        return self._selected_matrix_path
+
+    def _update_matrix_action_state(self) -> None:
+        has_matrix = self.selected_matrix is not None
+        has_catalog = bool(self._matrices)
+        has_multiple = len(self._matrices) > 1
+        for widget in (
+            self.model_selector,
+            self.q_min_slider,
+            self.q_max_slider,
+            self.time_min_slider,
+            self.time_max_slider,
+            self.initial_guess_button,
+            self.fit_button,
+            self.fitted_parameters_button,
+            self.plot_matrix_button,
+            self.plot_amplitude_button,
+        ):
+            widget.setEnabled(has_matrix)
+        self.merge_button.setEnabled(has_multiple)
+        self.average_button.setEnabled(has_multiple)
+        self.show_matrix_action.setEnabled(has_matrix)
+        self.plot_correlation_action.setEnabled(has_matrix)
+        self.save_matrix_action.setEnabled(has_matrix)
+        self.save_fit_action.setEnabled(False)
+        self.fit_all_action.setEnabled(has_catalog)
+        self.save_correlation_action.setEnabled(False)
+        self.contin_action.setEnabled(has_matrix)
 
     def _install_responsive_central_widget(self, content: QWidget) -> None:
         screen = self.screen()
