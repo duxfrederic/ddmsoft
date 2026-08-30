@@ -6,7 +6,7 @@ Work packages 0 through 2 are complete. The work was committed separately:
 - `00afc25` `build: add modern package shell`
 - `c8dd76c` `test: add backend contracts and fixtures`
 - `51ad485` `feat: add metadata and matrix I/O`
-- Package 4 is implemented in the next commit on this branch.
+- `7d8854f` `feat: add OpenCV DDM engine`
 
 ## Package 0
 
@@ -76,7 +76,7 @@ Work packages 0 through 2 are complete. The work was committed separately:
 
 - `python -m pytest`: 27 passed after packages 3 and 4.
 - Package 3 was committed as `51ad485`.
-- Package 4 verification passes locally; its commit follows this update.
+- Package 4 verification passes locally in `7d8854f`.
 - Package launcher, packaged resource loading, and Qt-free imports were checked.
 - The local environment is Python 3.11.13; the package declares the roadmap's
   Python 3.12 and 3.14 target. Ruff was not installed locally, so CI should run
