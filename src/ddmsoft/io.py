@@ -337,6 +337,32 @@ def save_matrix_set(
     return paths
 
 
+def save_partitioned_matrix_sets(
+    output_prefix: str | Path,
+    results: Iterable[object],
+) -> tuple[Path, ...]:
+    """Save time-dependent results using their actual starting-frame names."""
+    paths: list[Path] = []
+    prefix = Path(output_prefix)
+    for result in results:
+        start_frame = getattr(result, "start_frame")
+        data = getattr(result, "data")
+        datasets = (data,) if isinstance(data, DDMData) else tuple(data)
+        partition_prefix = prefix.with_name(f"{prefix.name}__i={start_frame}__")
+        if len(datasets) == 1:
+            paths.extend(save_matrix_set(partition_prefix, datasets[0]))
+        else:
+            for index, dataset in enumerate(datasets):
+                angle = index * 180.0 / len(datasets)
+                paths.extend(
+                    save_matrix_set(
+                        partition_prefix.with_name(f"{partition_prefix.name}{angle:.1f}_"),
+                        dataset,
+                    )
+                )
+    return tuple(paths)
+
+
 def save_autocorrelation_csv(
     output_prefix: str | Path,
     data: DDMData | Sequence[np.ndarray],
@@ -458,4 +484,5 @@ __all__ = [
     "save_matrix",
     "save_matrix_csv",
     "save_matrix_set",
+    "save_partitioned_matrix_sets",
 ]
