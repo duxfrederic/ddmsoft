@@ -1,6 +1,6 @@
 # Modernization Progress
 
-Work packages 0 through 2 are complete. The work was committed separately:
+Work packages 0 through 4 are complete. The work was committed separately:
 
 - `3e1b4bc` `docs: inventory legacy behavior`
 - `00afc25` `build: add modern package shell`
