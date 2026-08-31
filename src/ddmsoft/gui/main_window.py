@@ -158,7 +158,7 @@ class DDMMainWindow(QMainWindow):
         self.initial_guess_button.clicked.connect(self.edit_initial_guess)
         self.fit_button.clicked.connect(self.start_fitting)
         self.fitted_parameters_button.clicked.connect(self.plot_fitted_parameters)
-        self.plot_matrix_button.clicked.connect(self.plot_selected_matrix)
+        self.plot_matrix_button.clicked.connect(self.plot_selected_correlation)
         self.plot_amplitude_button.clicked.connect(self.plot_amplitude_noise_diffusion)
         self.show_matrix_action.triggered.connect(self.plot_selected_matrix)
         self.plot_correlation_action.triggered.connect(self.plot_selected_correlation)
@@ -526,7 +526,9 @@ class DDMMainWindow(QMainWindow):
         buttons = QHBoxLayout()
         self.plot_matrix_button = QPushButton("Plot the matrix and the fit")
         self.plot_matrix_button.setObjectName("plotMatrixButton")
-        self.plot_matrix_button.setToolTip("Open independent measured and fitted matrix plots")
+        self.plot_matrix_button.setToolTip(
+            "Open interactive correlation and DDM curves with q navigation"
+        )
         self.plot_amplitude_button = QPushButton(
             "Plot the amplitude, the noise, the diffusion"
         )

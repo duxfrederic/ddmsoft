@@ -117,6 +117,19 @@ def test_load_directory_populates_metadata_and_matrix_catalog(qapp, tmp_path, mo
     window.close()
 
 
+def test_plot_matrix_button_opens_interactive_correlation_plot(qapp, tmp_path):
+    root = _legacy_directory(tmp_path, "sample", q_count=3, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+
+    window.plot_matrix_button.click()
+
+    assert isinstance(window._plot_controllers[-1], CorrelationPlotController)
+    window.close()
+
+
 def test_load_matrix_only_directory_populates_matrix_catalog(qapp, tmp_path):
     root = tmp_path / "matrix_archive"
     root.mkdir()
