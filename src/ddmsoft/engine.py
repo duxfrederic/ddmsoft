@@ -462,6 +462,7 @@ def compute_ddm(
         fft_path = temporary_directory / "transformed.dat"
         transformed: np.memmap | None = None
         source_frame: np.ndarray | None = None
+        fft_complete = False
         try:
             transformed = np.memmap(
                 fft_path,
@@ -479,10 +480,14 @@ def compute_ddm(
                     dtype=np.complex64,
                 )
                 _report(progress, "frame_fft", index, frame_count)
+            fft_complete = True
         finally:
             del source_frame
             del source_frames
             frame_path.unlink(missing_ok=True)
+            if not fft_complete and transformed is not None:
+                transformed.flush()
+                del transformed
 
         try:
             averager = RadialAverager(frame_shape, sectors)

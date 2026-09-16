@@ -563,7 +563,7 @@ class DDMMainWindow(QMainWindow):
             "DDMSoft 0.1.0\n\n"
             "Originally developed in 2019 at RWTH Aachen University \n"
             "by Frédéric Dux & Jérome Crassous\n"
-            "2026: ported to a modern PySide6 stack by LLMs since PySimpleGUI is not an option anymore.\n"
+            "2026: ported to a modern PySide6 stack by LLMs.\n"
         )
 
     def load_current_directory(self) -> bool:
