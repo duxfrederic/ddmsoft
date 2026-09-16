@@ -327,7 +327,7 @@ def run_batch_fit(
                 fit.amplitude,
                 fit.noise,
                 fit.model_parameters,
-                model.parameter_names[:-2],
+                model.export_parameter_names[:-2],
                 viscosity=request.viscosity,
                 temperature=request.temperature,
             )

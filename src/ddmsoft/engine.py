@@ -509,6 +509,7 @@ def compute_ddm(
                     matrices[sector][lag_index] = curve
                 _report(progress, "lag_average", lag_index + 1, lags.size)
 
+            # pixel_size is m/pixel, so these q values are in inverse metres.
             q_values = 2.0 * np.pi * averager.q_bin_centers / pixel_size
             results = tuple(
                 DDMData(matrix=matrix, lag_times=lags / frame_rate, q_values=q_values)

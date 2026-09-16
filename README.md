@@ -54,6 +54,11 @@ three files are present: `*_DDM_matrix.npy`, `*_deltaTs.npy`, and `*_QS.npy`.
 The q-min, q-max, time-min, and time-max slider values are **inclusive**. The
 samples at both selected endpoints participate in fitting and plot markers.
 
+The cumulant models fit the DLS field-correlation function directly. They use
+`Gamma = D*q^2` with `D` in `m^2/s`, `mu2` as the second decay-rate cumulant in
+`s^-2`, and `mu3` as the third decay-rate cumulant in `s^-3`. The dimensionless
+cumulant PDI at a given q is `mu2 / Gamma^2`.
+
 ## Advanced workflows
 
 - Set more than one direction part to compute legacy opposite-direction sectors

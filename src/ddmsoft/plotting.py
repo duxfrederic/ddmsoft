@@ -206,6 +206,80 @@ class CorrelationPlotController(_PlotController):
             self.set_q_index(self.q_index - 1)
 
 
+class AutocorrelationPlotController(_PlotController):
+    """Plot sampled autocorrelation curves and matching fitted curves."""
+
+    def __init__(
+        self,
+        data: DDMData,
+        *,
+        fit: FitResult | None = None,
+        fit_range: FitRange | None = None,
+        title: str = "Correlation functions",
+    ) -> None:
+        self.data = data
+        self.fit = fit
+        selected_range = fit_range or FitRange(
+            0, data.q_values.size - 1, 0, data.lag_times.size - 1
+        )
+        q_count = selected_range.q_max - selected_range.q_min + 1
+        self.q_indices = np.unique(
+            np.linspace(
+                selected_range.q_min,
+                selected_range.q_max,
+                min(5, q_count),
+                dtype=int,
+            )
+        )
+        measured = _correlation_from_ddm(data)
+        self.measured_correlation = measured.copy()
+        self._fit_indices: dict[int, int] = {}
+        if fit is not None:
+            for data_index in self.q_indices:
+                fit_index = int(np.argmin(np.abs(fit.q_values - data.q_values[data_index])))
+                if np.isclose(fit.q_values[fit_index], data.q_values[data_index]):
+                    self._fit_indices[int(data_index)] = fit_index
+                    amplitude = fit.amplitude[fit_index]
+                    background = fit.noise[fit_index]
+                    self.measured_correlation[:, data_index] = np.divide(
+                        amplitude - (data.matrix[:, data_index] - background),
+                        amplitude,
+                        out=np.full(data.lag_times.size, np.nan),
+                        where=amplitude != 0,
+                    )
+
+        super().__init__(title, Figure(figsize=(9, 5)))
+        self.axis = self.figure.subplots()
+        self.figure.subplots_adjust(bottom=0.16)
+        positive_times = np.maximum(data.lag_times, np.finfo(float).tiny)
+        self.measured_lines = tuple(
+            self.axis.semilogx(
+                positive_times * data.q_values[index] ** 2,
+                self.measured_correlation[:, index],
+                marker="D",
+                mfc="none",
+                ls="None",
+                label=f"{data.q_values[index] / 1e6:.2f} um^-1",
+            )[0]
+            for index in self.q_indices
+        )
+        self.fit_lines = tuple(
+            self.axis.semilogx(
+                fit_times * fit.q_values[fit_index] ** 2,
+                fit.correlation[:, fit_index],
+                color=line.get_color(),
+                alpha=0.9,
+            )[0]
+            for line, data_index in zip(self.measured_lines, self.q_indices)
+            if (fit_index := self._fit_indices.get(int(data_index))) is not None
+            for fit_times in (data.lag_times[selected_range.time_min : selected_range.time_max + 1],)
+        )
+        self.axis.set_xlabel(r"tau q^2 [s/m^2]")
+        self.axis.set_ylabel(r"f(q,tau)")
+        self.axis.set_title("Correlation functions")
+        self.axis.legend(frameon=False, title="q [um^-1]")
+
+
 class MatrixPlotController(_PlotController):
     """Modeless measured/fitted matrix image window."""
 
@@ -451,6 +525,7 @@ CONTINController = CONTINPlotController
 
 __all__ = [
     "AmplitudeNoiseDiffusionPlotController",
+    "AutocorrelationPlotController",
     "CONTINController",
     "CONTINPlotController",
     "CorrelationPlotController",

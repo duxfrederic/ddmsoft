@@ -8,6 +8,7 @@ from ddmsoft.fitting import default_fit_request, fit_ddm
 from ddmsoft.models import DDMData, FitRange
 from ddmsoft.plotting import (
     AmplitudeNoiseDiffusionPlotController,
+    AutocorrelationPlotController,
     CONTINPlotController,
     CorrelationPlotController,
     MatrixPlotController,
@@ -46,6 +47,19 @@ def test_correlation_plot_q_callback_updates_owned_artists(app):
     assert controller.q_index == 1
     controller._on_scroll(type("Event", (), {"step": 1, "button": "up"})())
     assert controller.q_index == 2
+    controller.close()
+
+
+def test_autocorrelation_plot_samples_q_values_and_overlays_fit(app):
+    data = _data()
+    fit_range = FitRange(0, 2, 0, 2)
+    fit = fit_ddm(data, default_fit_request("stretch", fit_range))
+    controller = AutocorrelationPlotController(data, fit=fit, fit_range=fit_range)
+
+    assert np.array_equal(controller.q_indices, [0, 1, 2])
+    assert len(controller.measured_lines) == 3
+    assert len(controller.fit_lines) == 3
+    assert controller.axis.get_xlabel() == r"tau q^2 [s/m^2]"
     controller.close()
 
 

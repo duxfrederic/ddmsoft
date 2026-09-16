@@ -23,6 +23,7 @@ from ddmsoft.io import save_matrix_set
 from ddmsoft.models import DDMData, FitRange, VideoMetadata
 from ddmsoft.plotting import (
     AmplitudeNoiseDiffusionPlotController,
+    AutocorrelationPlotController,
     CONTINPlotController,
     CorrelationPlotController,
     FitParameterPlotController,
@@ -127,6 +128,21 @@ def test_plot_matrix_button_opens_interactive_correlation_plot(qapp, tmp_path):
     window.plot_matrix_button.click()
 
     assert isinstance(window._plot_controllers[-1], CorrelationPlotController)
+    window.close()
+
+
+def test_plot_correlation_action_opens_sampled_autocorrelation_plot(qapp, tmp_path):
+    root = _legacy_directory(tmp_path, "sample", q_count=8, time_count=4)
+    window = DDMMainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert window.load_directory_data(root)
+
+    window.plot_correlation_action.trigger()
+
+    controller = window._plot_controllers[-1]
+    assert isinstance(controller, AutocorrelationPlotController)
+    assert len(controller.measured_lines) == 5
     window.close()
 
 

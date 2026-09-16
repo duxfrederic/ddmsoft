@@ -21,6 +21,10 @@ FIT_MODEL_IDS = (
     "dblexpcosstretch",
 )
 
+CUMULANT_REFERENCE_Q = 2.0e6
+CUMULANT_PDI = 0.03
+CUMULANT_THIRD_NORMALIZED = -0.01
+
 LEGACY_SUFFIXES = ("_DDM_matrix.npy", "_deltaTs.npy", "_QS.npy")
 
 
@@ -85,11 +89,21 @@ def direct_ddm_reference(frames: Iterable[np.ndarray], lags: Iterable[int] | Non
 
 
 def model_parameters(model_id: str) -> tuple[float, ...]:
-    """Return stable, non-degenerate parameters for a legacy model ID."""
+    """Return stable, non-degenerate parameters in each model's physical units.
+
+    The cumulant values use the reference decay rate at q=2e6 m^-1, with
+    PDI=0.03 and normalized mu3=-0.01.
+    """
+    diffusion = 2.0e-12
+    gamma = diffusion * CUMULANT_REFERENCE_Q**2
     values = {
-        "cumulant_1": (2.0e-12,),
-        "cumulant_2": (2.0e-12, 3.0e-26),
-        "cumulant_3": (2.0e-12, 3.0e-26, 2.0e-38),
+        "cumulant_1": (diffusion,),
+        "cumulant_2": (diffusion, CUMULANT_PDI * gamma**2),
+        "cumulant_3": (
+            diffusion,
+            CUMULANT_PDI * gamma**2,
+            CUMULANT_THIRD_NORMALIZED * gamma**3,
+        ),
         "stretch": (2.0e-12, 0.82),
         "dblexp_2ndstretched": (2.0e-12, 6.0e-13, 0.78, 0.65),
         "expcos": (2.0e-12, 1.0e-7),
@@ -105,10 +119,11 @@ def model_parameters(model_id: str) -> tuple[float, ...]:
 def _correlation(model_id: str, parameters: tuple[float, ...], q: np.ndarray, times: np.ndarray) -> np.ndarray:
     tau = times[:, None] * q[None, :] ** 2
     if model_id.startswith("cumulant_"):
-        result = np.ones_like(tau)
+        gamma = parameters[0] * q[None, :] ** 2
+        exponent = -gamma * times[:, None]
         for order, cumulant in enumerate(parameters[1:], start=2):
-            result += (-1) ** order * cumulant * tau**order / math.factorial(order)
-        return result * np.exp(-parameters[0] * tau)
+            exponent += (-1) ** order * cumulant * times[:, None] ** order / math.factorial(order)
+        return np.exp(exponent)
     if model_id == "stretch":
         return np.exp(-(parameters[0] * tau) ** parameters[1])
     if model_id in {"dblexp_2ndstretched", "dblexpcosstretch"}:
@@ -128,6 +143,20 @@ def _correlation(model_id: str, parameters: tuple[float, ...], q: np.ndarray, ti
     raise ValueError(f"unknown fit model: {model_id}")
 
 
+def _q_scaled_cumulant_correlation(
+    model_id: str, q: np.ndarray, times: np.ndarray
+) -> np.ndarray:
+    """Generate cumulants with fixed PDI and normalized third cumulant."""
+    diffusion = 2.0e-12
+    gamma = diffusion * q[None, :] ** 2
+    second = CUMULANT_PDI * gamma**2
+    exponent = -gamma * times[:, None] + second * times[:, None] ** 2 / 2.0
+    if model_id == "cumulant_3":
+        third = CUMULANT_THIRD_NORMALIZED * gamma**3
+        exponent -= third * times[:, None] ** 3 / 6.0
+    return np.exp(exponent)
+
+
 def generate_model_data(
     model_id: str,
     q_values: np.ndarray | None = None,
@@ -143,7 +172,12 @@ def generate_model_data(
     )
     amplitude = np.linspace(1.0, 1.3, q.size)
     background = np.linspace(0.02, 0.05, q.size)
-    matrix = amplitude[None, :] * (1.0 - _correlation(model_id, parameters, q, times)) + background[None, :]
+    correlation = (
+        _q_scaled_cumulant_correlation(model_id, q, times)
+        if model_id in {"cumulant_2", "cumulant_3"}
+        else _correlation(model_id, parameters, q, times)
+    )
+    matrix = amplitude[None, :] * (1.0 - correlation) + background[None, :]
     if noise:
         matrix = matrix + np.random.default_rng(seed).normal(0.0, noise, matrix.shape)
     return DDMData(matrix=matrix, lag_times=times, q_values=q)

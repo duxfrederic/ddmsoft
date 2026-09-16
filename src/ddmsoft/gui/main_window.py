@@ -61,6 +61,7 @@ from ..io import (
 from ..models import DDMData, FitRange, FitRequest, FitResult, VideoMetadata
 from ..plotting import (
     AmplitudeNoiseDiffusionPlotController,
+    AutocorrelationPlotController,
     CONTINPlotController,
     CorrelationPlotController,
     FitParameterPlotController,
@@ -161,7 +162,7 @@ class DDMMainWindow(QMainWindow):
         self.plot_matrix_button.clicked.connect(self.plot_selected_correlation)
         self.plot_amplitude_button.clicked.connect(self.plot_amplitude_noise_diffusion)
         self.show_matrix_action.triggered.connect(self.plot_selected_matrix)
-        self.plot_correlation_action.triggered.connect(self.plot_selected_correlation)
+        self.plot_correlation_action.triggered.connect(self.plot_selected_autocorrelations)
         self.save_matrix_action.triggered.connect(self.export_selected_matrix)
         self.save_fit_action.triggered.connect(self.export_selected_fit)
         self.save_correlation_action.triggered.connect(self.export_selected_correlation)
@@ -560,8 +561,9 @@ class DDMMainWindow(QMainWindow):
             self,
             "About DDMSoft",
             "DDMSoft 0.1.0\n\n"
-            "Differential dynamic microscopy analysis on a modern PySide6 stack.\n"
-            "Originally developed in 2019 at RWTH Aachen University.",
+            "Originally developed in 2019 at RWTH Aachen University \n"
+            "by Frédéric Dux & Jérome Crassous\n"
+            "2026: ported to a modern PySide6 stack by LLMs since PySimpleGUI is not an option anymore.\n"
         )
 
     def load_current_directory(self) -> bool:
@@ -863,7 +865,7 @@ class DDMMainWindow(QMainWindow):
                 fit.amplitude,
                 fit.noise,
                 fit.model_parameters,
-                model.parameter_names[:-2],
+                model.export_parameter_names[:-2],
                 viscosity=viscosity,
                 temperature=temperature,
             )
@@ -1799,6 +1801,22 @@ class DDMMainWindow(QMainWindow):
             fit=fit,
             fit_range=fit_range,
             title=f"DDM correlation: {self._selected_matrix_path.name}",
+        )
+        return self._show_plot(controller)
+
+    def plot_selected_autocorrelations(self) -> object | None:
+        """Open sampled autocorrelation curves over the selected q range."""
+        data = self.selected_matrix
+        if data is None:
+            self.status_label.setText("No matrix selected")
+            return None
+        fit = self.selected_fit
+        fit_range = self.selected_fit_range if fit is not None else self.current_fit_request().fit_range
+        controller = AutocorrelationPlotController(
+            data,
+            fit=fit,
+            fit_range=fit_range,
+            title=f"Correlation functions: {self._selected_matrix_path.name}",
         )
         return self._show_plot(controller)
 

@@ -91,8 +91,11 @@ Work packages 0 through 13 are complete. Earlier packages were committed separat
   coordinates for the existing SI-valued parameters.
 - Added per-q convergence status and messages, continuation after an optimizer
   failure, progress/cancellation hooks, and caller-input immutability.
-- Corrected the deterministic cumulant fixture parameters to use the SI scale
-  implied by their model formula, keeping generated data numerically meaningful.
+- Cumulant models use the standard DLS field-correlation log expansion with
+  dimensional decay-rate cumulants (`mu2` in s^-2 and `mu3` in s^-3).
+- Cumulant fixtures use a modest dimensionless PDI and normalized third
+  cumulant at a characteristic decay rate, keeping generated data numerically
+  meaningful.
 - Added generated-data coverage for every model, inclusive final positions,
   nonzero q-min alignment, fixed values, failure continuation, and cancellation.
 

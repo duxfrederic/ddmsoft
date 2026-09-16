@@ -1,4 +1,10 @@
-"""Structured, GUI-independent fitting for DDM matrices."""
+"""Structured, GUI-independent fitting for DDM matrices.
+
+Cumulant models use the DLS field-correlation convention. For ``Gamma = D*q**2``:
+``log(f) = -Gamma*t + mu2*t**2/2! - mu3*t**3/3! + ...``.
+Here ``D`` is in m^2/s, ``mu2`` in s^-2, and ``mu3`` in s^-3.
+The corresponding dimensionless PDI at a q value is ``mu2 / Gamma**2``.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +48,18 @@ class ModelDefinition:
         return tuple(parameter.identifier for parameter in self.parameters)
 
     @property
+    def export_parameter_names(self) -> tuple[str, ...]:
+        """Return parameter headers with units for dimensional cumulant fits."""
+        if not self.identifier.startswith("cumulant_"):
+            return self.parameter_names
+        units = {
+            "diffusion": "D [m^2/s]",
+            "cumulant_2": "mu2 [s^-2]",
+            "cumulant_3": "mu3 [s^-3]",
+        }
+        return tuple(units.get(parameter.identifier, parameter.identifier) for parameter in self.parameters)
+
+    @property
     def physical_parameters(self) -> tuple[ParameterDefinition, ...]:
         return self.parameters[:-2]
 
@@ -69,11 +87,23 @@ def _q_times(q_values: np.ndarray | float, times: np.ndarray) -> np.ndarray:
 def _cumulant(
     order: int, parameters: np.ndarray, q_values: np.ndarray, times: np.ndarray
 ) -> np.ndarray:
-    tau = _tau(q_values, times)
-    result = np.ones_like(tau, dtype=float)
+    """Evaluate the DLS field-correlation log-cumulant expansion.
+
+    The first cumulant is ``Gamma = D*q**2`` in inverse seconds. Higher
+    cumulants are dimensional decay-rate cumulants, so their powers multiply
+    powers of time directly. This is a g1-like field correlation, not a
+    Siegert-transformed intensity correlation.
+    """
+    q = np.asarray(q_values)
+    time = np.asarray(times)
+    gamma = parameters[0] * q**2
+    if q.ndim == 1 and time.ndim == 1:
+        gamma = gamma[None, :]
+        time = time[:, None]
+    exponent = -gamma * time
     for index, cumulant in enumerate(parameters[1:order], start=2):
-        result += (-1) ** index * cumulant * tau**index / factorial(index)
-    return result * np.exp(-parameters[0] * tau)
+        exponent += (-1) ** index * cumulant * time**index / factorial(index)
+    return np.exp(exponent)
 
 
 def _single_exponential(
@@ -147,15 +177,15 @@ MODEL_REGISTRY: dict[str, ModelDefinition] = {
         "cumulant_1",
         "Single exponential decay",
         _single_exponential,
-        (_parameter("diffusion", "Diffusion coefficient", 2e-12),),
+        (_parameter("diffusion", "Diffusion coefficient D [m^2/s]", 2e-12),),
     ),
     "cumulant_2": _definition(
         "cumulant_2",
         "Cumulants up to second order",
         lambda parameters, q, times: _cumulant(2, parameters, q, times),
         (
-            _parameter("diffusion", "Diffusion coefficient", 2e-12),
-            _parameter("cumulant_2", "2nd cumulant", 0.0),
+            _parameter("diffusion", "Diffusion coefficient D [m^2/s]", 2e-12),
+            _parameter("cumulant_2", "2nd decay-rate cumulant mu2 [s^-2]", 0.0),
         ),
     ),
     "cumulant_3": _definition(
@@ -163,9 +193,9 @@ MODEL_REGISTRY: dict[str, ModelDefinition] = {
         "Cumulants up to third order",
         lambda parameters, q, times: _cumulant(3, parameters, q, times),
         (
-            _parameter("diffusion", "Diffusion coefficient", 2e-12),
-            _parameter("cumulant_2", "2nd cumulant", 0.0),
-            _parameter("cumulant_3", "3rd cumulant", 0.0),
+            _parameter("diffusion", "Diffusion coefficient D [m^2/s]", 2e-12),
+            _parameter("cumulant_2", "2nd decay-rate cumulant mu2 [s^-2]", 0.0),
+            _parameter("cumulant_3", "3rd decay-rate cumulant mu3 [s^-3]", 0.0),
         ),
     ),
     "stretch": _definition(
@@ -252,7 +282,7 @@ def evaluate_model(
     q_values: Iterable[float] | float,
     lag_times: Iterable[float],
 ) -> np.ndarray:
-    """Evaluate a registered correlation model from physical parameters."""
+    """Evaluate a registered model for q in m^-1 and lag times in seconds."""
     model = get_model(model_id)
     values = np.asarray(tuple(parameters), dtype=float)
     expected = len(model.physical_parameters)
@@ -295,10 +325,14 @@ def _fit_one_q(
     def objective(candidate: np.ndarray) -> float:
         values = np.asarray(candidate, dtype=float) * scales
         values[fixed] = initial[fixed]
+        if model.identifier.startswith("cumulant_") and values[0] <= 0:
+            return 1e300
+        if model.identifier in {"cumulant_2", "cumulant_3"} and values[1] < 0:
+            return 1e300
         with np.errstate(all="ignore"):
             correlation = model.function(values[:-2], np.asarray(q_value), times)
-        predicted = values[-2] * (1.0 - correlation) + values[-1]
-        residual = (observations - predicted) ** 2 / denominator
+            predicted = values[-2] * (1.0 - correlation) + values[-1]
+            residual = (observations - predicted) ** 2 / denominator
         if not np.all(np.isfinite(residual)):
             return 1e300
         return float(np.sum(residual))
@@ -320,13 +354,38 @@ def _fit_one_q(
     return values, bool(optimized.success), message
 
 
-def _parameter_scales(model: ModelDefinition) -> np.ndarray:
+def _parameter_scales(
+    model: ModelDefinition,
+    *,
+    q_value: float | None = None,
+    times: np.ndarray | None = None,
+    initial: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return optimizer scales, using a characteristic decay rate for cumulants."""
+    characteristic_rate: float | None = None
+    q_squared = None if q_value is None else float(q_value) ** 2
+    diffusion_scale = 1e-12
+    if model.identifier.startswith("cumulant_") and q_squared and times is not None:
+        time_values = np.asarray(times, dtype=float)
+        time_scale = 1.0 / max(float(np.max(np.abs(time_values))), np.finfo(float).tiny)
+        diffusion = (
+            abs(float(initial[0]))
+            if initial is not None and initial.size and np.isfinite(initial[0])
+            else 0.0
+        )
+        diffusion_scale = max(diffusion, 1e-12)
+        characteristic_rate = max(diffusion * q_squared, time_scale)
     scales = []
     for parameter in model.parameters:
         if parameter.identifier.startswith("diffusion"):
-            scales.append(1e-12)
-        elif parameter.identifier.startswith("cumulant"):
-            scales.append(1e-26)
+            scales.append(
+                diffusion_scale if characteristic_rate is not None else 1e-12
+            )
+        elif parameter.identifier.startswith("cumulant_"):
+            order = int(parameter.identifier.rsplit("_", 1)[1])
+            scales.append(
+                characteristic_rate**order if characteristic_rate is not None else 1e-12**order
+            )
         elif parameter.identifier == "flow":
             scales.append(1e-7)
         else:
@@ -341,13 +400,16 @@ def fit_ddm(
     progress: ProgressCallback | None = None,
     cancel: Callable[[], bool] | object | None = None,
 ) -> FitResult:
-    """Fit one inclusive q/time selection and return per-q diagnostics."""
+    """Fit one inclusive q/time selection and return per-q diagnostics.
+
+    Cumulant fits return D in m^2/s and decay-rate cumulants in inverse-second
+    powers; each q column has its own ``Gamma = D*q^2``.
+    """
     if not isinstance(data, DDMData):
         raise TypeError("data must be a DDMData instance")
     if not isinstance(request, FitRequest):
         raise TypeError("request must be a FitRequest instance")
     model = get_model(request.model_id)
-    scales = _parameter_scales(model)
     if len(request.fixed_flags) != len(model.parameters):
         raise ValueError(
             f"{request.model_id} expects {len(model.parameters)} fixed flags, "
@@ -383,6 +445,12 @@ def fit_ddm(
             initial[-2] = amplitude_estimate[request.fit_range.q_min + index]
         if request.initial_values[-1] is None:
             initial[-1] = background_estimate[request.fit_range.q_min + index]
+        scales = _parameter_scales(
+            model,
+            q_value=float(q_value),
+            times=times,
+            initial=initial,
+        )
         fitted, success, message = _fit_one_q(
             model, q_value, times, observations[:, index], initial, fixed, scales
         )

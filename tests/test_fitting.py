@@ -6,14 +6,16 @@ import pytest
 from ddmsoft.fitting import (
     MODEL_REGISTRY,
     FitCancelled,
+    _parameter_scales,
     default_fit_request,
     estimate_amplitude_background,
     evaluate_model,
     fit_ddm,
+    get_model,
 )
 from ddmsoft.models import FitRange, FitRequest
 
-from .fixtures import FIT_MODEL_IDS, generate_model_data
+from .fixtures import FIT_MODEL_IDS, generate_model_data, model_parameters
 
 
 def test_registry_contains_every_legacy_model_with_stable_identifiers():
@@ -22,6 +24,44 @@ def test_registry_contains_every_legacy_model_with_stable_identifiers():
     assert all(len(model.parameters) == len(model.defaults) for model in MODEL_REGISTRY.values())
     assert all(model.parameters[-2].identifier == "amplitude" for model in MODEL_REGISTRY.values())
     assert all(model.parameters[-1].identifier == "background" for model in MODEL_REGISTRY.values())
+    assert get_model("cumulant_3").export_parameter_names[:3] == (
+        "D [m^2/s]",
+        "mu2 [s^-2]",
+        "mu3 [s^-3]",
+    )
+
+
+def test_cumulant_equations_use_decay_rate_and_log_cumulant_terms():
+    q_values = np.array([1.0e6, 2.0e6])
+    times = np.array([0.01, 0.5])
+    diffusion = 2.0e-12
+    second = 1.5
+    third = -0.4
+    gamma = diffusion * q_values[None, :] ** 2
+
+    first_expected = np.exp(-gamma * times[:, None])
+    second_expected = np.exp(
+        -gamma * times[:, None] + second * times[:, None] ** 2 / 2.0
+    )
+    third_expected = np.exp(
+        -gamma * times[:, None]
+        + second * times[:, None] ** 2 / 2.0
+        - third * times[:, None] ** 3 / 6.0
+    )
+
+    assert np.allclose(
+        evaluate_model("cumulant_1", (diffusion,), q_values, times), first_expected
+    )
+    assert np.allclose(
+        evaluate_model("cumulant_2", (diffusion, second), q_values, times), second_expected
+    )
+    assert np.allclose(
+        evaluate_model("cumulant_3", (diffusion, second, third), q_values, times), third_expected
+    )
+    assert np.allclose(
+        evaluate_model("cumulant_3", (diffusion, second, third), q_values[0], times),
+        third_expected[:, 0],
+    )
 
 
 @pytest.mark.parametrize("model_id", FIT_MODEL_IDS)
@@ -45,6 +85,62 @@ def test_every_model_fits_generated_data_and_recreates_returned_curve(model_id):
         assert np.allclose(result.correlation[:, index], correlation)
         assert np.allclose(result.fitted_matrix[:, index], expected)
     assert np.mean((result.fitted_matrix - data.matrix) ** 2) < 1e-5
+
+
+@pytest.mark.parametrize("model_id", ("cumulant_1", "cumulant_2", "cumulant_3"))
+def test_cumulant_fits_keep_physical_parameters(model_id):
+    data = generate_model_data(model_id, noise=1.0e-3)
+    fit_range = FitRange(0, data.q_values.size - 1, 0, data.lag_times.size - 1)
+
+    result = fit_ddm(data, default_fit_request(model_id, fit_range))
+
+    assert np.all(result.model_parameters[0] > 0)
+    if model_id != "cumulant_1":
+        assert np.all(result.model_parameters[1] >= 0)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "initial_values", "fixed_flags"),
+    (
+        ("cumulant_2", (1.5e-12, 0.5, 1.0, 0.02), (False, False, True, True)),
+        (
+            "cumulant_3",
+            (1.5e-12, 0.5, -1.0, 1.0, 0.02),
+            (False, False, False, True, True),
+        ),
+    ),
+)
+def test_cumulant_fits_recover_decay_rate_cumulants_and_conventional_pdi(
+    model_id, initial_values, fixed_flags
+):
+    q_values = np.array([2.0e6])
+    data = generate_model_data(
+        model_id,
+        q_values=q_values,
+        lag_times=np.linspace(0.01, 0.4, 40),
+    )
+    fit_range = FitRange(0, 0, 0, data.lag_times.size - 1)
+    result = fit_ddm(data, FitRequest(model_id, initial_values, fixed_flags, fit_range))
+    expected = np.asarray(model_parameters(model_id))
+    actual = np.asarray([parameters[0] for parameters in result.model_parameters])
+
+    assert np.allclose(actual, expected, rtol=2e-4, atol=1e-12)
+    gamma = result.model_parameters[0][0] * q_values[0] ** 2
+    pdi = result.model_parameters[1][0] / gamma**2
+    assert np.isclose(pdi, 0.03, rtol=2e-4)
+    if model_id == "cumulant_3":
+        assert result.model_parameters[2][0] < 0
+
+
+def test_cumulant_optimizer_scales_follow_the_characteristic_decay_rate():
+    model = get_model("cumulant_3")
+    initial = np.array([2.0e-12, 0.0, 0.0, 1.0, 0.02])
+    times = np.array([0.01, 0.5])
+
+    scales = _parameter_scales(model, q_value=2.0e6, times=times, initial=initial)
+    gamma_scale = 2.0e-12 * (2.0e6**2)
+
+    assert np.allclose(scales[:3], [2.0e-12, gamma_scale**2, gamma_scale**3])
 
 
 def test_inclusive_final_q_and_time_positions_are_fitted():
