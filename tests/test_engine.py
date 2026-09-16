@@ -122,6 +122,18 @@ def test_computation_uses_disk_backed_cache_without_changing_output_shape():
     assert result.lag_times.size == 2
 
 
+def test_disk_backed_cache_is_removed_after_computation(tmp_path):
+    compute_ddm(
+        random_frames(4, (4, 4), seed=10),
+        20,
+        2e-6,
+        points_per_decade=1,
+        cache_directory=tmp_path,
+    )
+
+    assert not tuple(tmp_path.glob(".ddmsoft-cache-*"))
+
+
 def test_rectangular_frames_are_rejected_before_fft():
     with pytest.raises(ValueError, match="square"):
         compute_ddm(random_frames(3, (4, 6)), 10, 1e-6)

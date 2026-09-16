@@ -461,6 +461,7 @@ def compute_ddm(
         )
         fft_path = temporary_directory / "transformed.dat"
         transformed: np.memmap | None = None
+        source_frame: np.ndarray | None = None
         try:
             transformed = np.memmap(
                 fft_path,
@@ -468,15 +469,18 @@ def compute_ddm(
                 mode="w+",
                 shape=(frame_count, *frame_shape),
             )
-            for index, frame in enumerate(source_frames, start=1):
+            for index, source_frame in enumerate(source_frames, start=1):
                 if _cancel_requested(cancel):
                     raise ComputationCancelled("DDM computation cancelled during FFT")
                 transformed[index - 1] = np.asarray(
-                    np.fft.fft2(frame if window is None else frame * window),
+                    np.fft.fft2(
+                        source_frame if window is None else source_frame * window
+                    ),
                     dtype=np.complex64,
                 )
                 _report(progress, "frame_fft", index, frame_count)
         finally:
+            del source_frame
             del source_frames
             frame_path.unlink(missing_ok=True)
 
