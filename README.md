@@ -1,8 +1,28 @@
 # DDMSoft
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/duxfrederic/ddmsoft/main/logo/logo.png" alt="DDMSoft logo" width="180">
+</p>
+
 DDMSoft is a native desktop application for differential dynamic microscopy
 (DDM): it reads microscopy videos, computes DDM matrices, fits relaxation
 models, and provides interactive plots and exports.
+
+DDMSoft was originally developed during a 2019 internship at RWTH Aachen,
+organized by Jerome J. Crassous and funded by a BioSoft scholarship. The
+original project page includes an introduction and examples:
+<https://duxfrederic.github.io/ddmsoft/>.
+
+## Features
+
+- Fast conversion of microscopy videos to DDM matrices.
+- Exploration and selection of matrices for further analysis.
+- Wavenumber-dependent correlation-function plots for checking measurement
+  quality.
+- Multi-wavenumber fitting with single and double exponentials, stretched
+  exponentials, cumulants, exponential-plus-flow models, and CONTIN.
+- Tools for combining, averaging, exporting, and batch-fitting the large data
+  sets produced by DDM analysis.
 
 ## Install and launch
 
