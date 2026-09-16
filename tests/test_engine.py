@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from struct import pack
+
 import numpy as np
 import pytest
 
 from ddmsoft.engine import (
     ComputationCancelled,
     RadialAverager,
+    RawAVIFrameReader,
     VideoReadError,
     compute_ddm,
     log_spaced_lags,
+    read_video_frames,
 )
 from ddmsoft.io import save_matrix_set
 from ddmsoft.models import DDMData
@@ -24,10 +28,64 @@ def _radial_reference(spectrum: np.ndarray) -> np.ndarray:
     return np.histogram(distances, bins, weights=spectrum)[0] / np.histogram(distances, bins)[0]
 
 
+def _write_raw_avi(path):
+    width, height = 2, 2
+
+    def chunk(identifier, data):
+        padding = b"\0" if len(data) % 2 else b""
+        return identifier + pack("<I", len(data)) + data + padding
+
+    def list_chunk(identifier, data):
+        return chunk(b"LIST", identifier + data)
+
+    def frame(values):
+        pixels = np.asarray(values, dtype=np.uint8).reshape(height, width, 3)
+        return b"".join(row.tobytes() + b"\0\0" for row in pixels[::-1])
+
+    stream_header = b"vidsDIB " + b"\0" * 48
+    format_header = pack(
+        "<IiiHHIIiiII",
+        40,
+        width,
+        height,
+        1,
+        24,
+        0,
+        width * height * 3,
+        0,
+        0,
+        0,
+        0,
+    )
+    header = list_chunk(
+        b"hdrl",
+        list_chunk(b"strl", chunk(b"strh", stream_header) + chunk(b"strf", format_header)),
+    )
+    movie = list_chunk(
+        b"movi",
+        chunk(b"00dc", frame([[[10, 10, 10], [20, 20, 20]], [[30, 30, 30], [40, 40, 40]]]))
+        + chunk(b"00dc", frame([[[50, 50, 50], [60, 60, 60]], [[70, 70, 70], [80, 80, 80]]])),
+    )
+    body = b"AVI " + header + movie
+    path.write_bytes(b"RIFF" + pack("<I", len(body)) + body)
+
+
 def test_short_videos_always_have_valid_lag_one():
     for count in range(2, 10):
         lags = log_spaced_lags(count)
         assert np.array_equal(lags, np.arange(1, count))
+
+
+def test_uncompressed_dib_avi_reader_avoids_opencv_and_preserves_frames(tmp_path):
+    path = tmp_path / "raw.avi"
+    _write_raw_avi(path)
+
+    reader = read_video_frames(path)
+    frames = list(reader)
+
+    assert isinstance(reader, RawAVIFrameReader)
+    assert np.array_equal(frames[0], [[10, 20], [30, 40]])
+    assert np.array_equal(frames[1], [[50, 60], [70, 80]])
 
 
 def test_invalid_lag_inputs_are_rejected():
@@ -54,6 +112,14 @@ def test_isotropic_output_matches_independent_full_fft_reference():
     expected = np.vstack([_radial_reference(power) for power in full_power])[:, :4]
     assert np.allclose(result.matrix, expected)
     assert np.all(result.q_values > 0)
+
+
+def test_computation_uses_disk_backed_cache_without_changing_output_shape():
+    result = compute_ddm(random_frames(5, (8, 8), seed=9), 20, 2e-6, points_per_decade=1)
+
+    assert isinstance(result, DDMData)
+    assert result.matrix.shape == (2, 4)
+    assert result.lag_times.size == 2
 
 
 def test_rectangular_frames_are_rejected_before_fft():
